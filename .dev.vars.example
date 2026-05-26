@@ -1,0 +1,21 @@
+# Cloudflare Workers secrets for local development (do NOT commit)
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=change_me
+SESSION_SECRET=change_me_random_secret_key_32chars
+DEFAULT_APP_VERSION=0.1.0
+CORS_ORIGINS=http://localhost:1420,http://127.0.0.1:1420,https://tauri.localhost,tauri://localhost
+
+# RSA private key in PKCS#8 DER hex format (convert with: npm run convert-key)
+# Copy the PKCS#8 output from the conversion script
+RSA_PRIVATE_KEY_PKCS8_HEX=
+
+# AES key (32 bytes, hex encoded). Default: EF4A77236A60236EA8B20C1D45F4472A
+# AES_KEY_HEX=4546344137373233364136303233364541384232304331443435463434373241
+
+# Rate limits
+ACTIVATE_RATE_LIMIT_IP_MAX=30
+ACTIVATE_RATE_LIMIT_IP_WINDOW_SECONDS=60
+ACTIVATE_RATE_LIMIT_IP_FAIL_MAX=15
+ACTIVATE_RATE_LIMIT_IP_FAIL_WINDOW_SECONDS=300
+ACTIVATE_RATE_LIMIT_ORDER_FAIL_MAX=8
+ACTIVATE_RATE_LIMIT_ORDER_FAIL_WINDOW_SECONDS=3600

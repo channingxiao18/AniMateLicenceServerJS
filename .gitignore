@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.dev.vars
+keys/
+*.db
+*.db-journal
+.DS_Store
+.env.local
+.wrangler/
