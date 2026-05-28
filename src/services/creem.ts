@@ -47,6 +47,8 @@ async function creemRequest<T>(
   body: Record<string, string>
 ): Promise<T> {
   const url = `${baseUrl(config.testMode)}${endpoint}`;
+  const keyPrefix = config.apiKey ? config.apiKey.substring(0, 10) + "..." : "(empty)";
+  console.log("[Creem] Request:", JSON.stringify({ url, keyPrefix, body }));
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -63,8 +65,10 @@ async function creemRequest<T>(
       const errBody = await res.json() as Record<string, string>;
       errMsg = errBody.message || errMsg;
       errCode = errBody.error || errCode;
+      console.error("[Creem] API error:", JSON.stringify({ url, status: res.status, body: errBody }));
     } catch {
-      // ignore parse errors
+      const text = await res.text();
+      console.error("[Creem] API error (raw):", JSON.stringify({ url, status: res.status, body: text }));
     }
     throw new CreemApiError(res.status, errMsg, errCode);
   }
