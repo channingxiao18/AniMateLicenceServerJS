@@ -202,7 +202,7 @@ async function activateCreemOrder(
         tier: product.tier,
         features: JSON.parse(product.featuresJson || "[]"),
         maxAppMajor: product.maxAppMajor,
-        validDay: 0,
+        validDay: config.creemTestMode ? 7 : 0,
       });
 
       const licenceStr = await issueLicence(
@@ -378,7 +378,7 @@ async function activateCreemOrder(
     tier: product.tier,
     features: JSON.parse(product.featuresJson || "[]"),
     maxAppMajor: product.maxAppMajor,
-    validDay: 0,
+    validDay: config.creemTestMode ? 7 : 0,
   });
 
   const licenceStr = await issueLicence(
