@@ -8,6 +8,10 @@ binding = "DB"
 database_name = "animate-licence-db"
 database_id = "e2c38144-73ff-4f84-b1b9-4d859db796ec"
 
+[vars]
+CREEM_TEST_MODE = "true"
+CREEM_DEFAULT_PRODUCT_ID = "animate-companion-lifetime-basic-v1"
+
 [env.production.vars]
 ADMIN_USERNAME = "admin"
 CORS_ORIGINS = "http://localhost:1420,http://127.0.0.1:1420,https://tauri.localhost,tauri://localhost"
@@ -18,8 +22,6 @@ ACTIVATE_RATE_LIMIT_IP_FAIL_MAX = "15"
 ACTIVATE_RATE_LIMIT_IP_FAIL_WINDOW_SECONDS = "300"
 ACTIVATE_RATE_LIMIT_ORDER_FAIL_MAX = "8"
 ACTIVATE_RATE_LIMIT_ORDER_FAIL_WINDOW_SECONDS = "3600"
-CREEM_TEST_MODE = "true"
-CREEM_DEFAULT_PRODUCT_ID = "animate-companion-lifetime-basic-v1"
 
 # Secrets (set via: wrangler secret put <NAME>)
 #   ADMIN_PASSWORD
