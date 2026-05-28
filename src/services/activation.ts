@@ -261,9 +261,13 @@ async function activateCreemOrder(
     );
   } catch (err) {
     if (err instanceof CreemApiError) {
+      const keyHint = config.creemApiKey
+        ? config.creemApiKey.substring(0, 10) + "..."
+        : "(empty)";
+      const testMode = config.creemTestMode ? "test" : "production";
       throw new ActivationError(
         "CREEM_ACTIVATION_FAILED",
-        `Creem 激活失败: ${err.message}`,
+        `Creem 激活失败: ${err.message} [key=${keyHint}, mode=${testMode}]`,
         err.statusCode >= 400 && err.statusCode < 500 ? 400 : 502
       );
     }
