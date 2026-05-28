@@ -17,6 +17,10 @@ export interface AppConfig {
   activateRateLimitIpFailWindowSeconds: number;
   activateRateLimitOrderFailMax: number;
   activateRateLimitOrderFailWindowSeconds: number;
+  // Creem
+  creemApiKey: string;
+  creemTestMode: boolean;
+  creemDefaultProductId: string;
 }
 
 export function loadConfig(env: Record<string, string | undefined>): AppConfig {
@@ -54,5 +58,9 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
       env.ACTIVATE_RATE_LIMIT_ORDER_FAIL_WINDOW_SECONDS || "3600",
       10
     ),
+    creemApiKey: env.CREEM_API_KEY || "",
+    creemTestMode: (env.CREEM_TEST_MODE || "false").toLowerCase() === "true",
+    creemDefaultProductId:
+      env.CREEM_DEFAULT_PRODUCT_ID || "animate-companion-lifetime-basic-v1",
   };
 }

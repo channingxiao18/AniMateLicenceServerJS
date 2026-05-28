@@ -35,6 +35,9 @@ export interface Env {
   ACTIVATE_RATE_LIMIT_IP_FAIL_WINDOW_SECONDS?: string;
   ACTIVATE_RATE_LIMIT_ORDER_FAIL_MAX?: string;
   ACTIVATE_RATE_LIMIT_ORDER_FAIL_WINDOW_SECONDS?: string;
+  CREEM_API_KEY?: string;
+  CREEM_TEST_MODE?: string;
+  CREEM_DEFAULT_PRODUCT_ID?: string;
 }
 
 // ─── HTML helpers (inline, no Jinja2 dependency) ──────────────────────────
@@ -188,7 +191,7 @@ async function initApp(env: Env) {
     for (const o of result.items) {
       const ent = o.entitlement;
       rows += `<tr><td><a href="/admin/orders/${es(o.orderId)}"><code>${es(o.orderId)}</code></a></td>
-        <td>${statusBadge(o.status)}</td><td>${ent ? statusBadge(ent.status) : "-"}</td>
+        <td>${statusBadge(o.status)}</td><td>${es(o.channel)}</td><td>${ent ? statusBadge(ent.status) : "-"}</td>
         <td>${ent?.fingerprint ? es(ent.fingerprint.substring(0, 32)) + "..." : "-"}</td>
         <td>${o.createdAt || "-"}</td>
         <td class="actions">${o.status === "used" ? `<a href="/admin/orders/${es(o.orderId)}" class="btn">详情</a>` : ""}
@@ -224,8 +227,8 @@ async function initApp(env: Env) {
       <div class="form-group"><label>备注</label><input type="text" name="notes"></div>
       <button type="submit" class="btn btn-primary" style="width:100%">生成</button></form></div></details></div></div>
       <div class="card" style="padding:0;overflow-x:auto"><table>
-      <thead><tr><th>订单号</th><th>订单状态</th><th>授权状态</th><th>指纹</th><th>创建时间</th><th>操作</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="6" style="text-align:center;color:#999;padding:32px">暂无数据</td></tr>'}</tbody></table></div>
+      <thead><tr><th>订单号</th><th>订单状态</th><th>渠道</th><th>授权状态</th><th>指纹</th><th>创建时间</th><th>操作</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="7" style="text-align:center;color:#999;padding:32px">暂无数据</td></tr>'}</tbody></table></div>
       ${pagination ? `<div class="pagination">${pagination}</div>` : ""}`,
       '<a href="/admin/">仪表板</a> / 订单'
     ));
@@ -245,7 +248,8 @@ async function initApp(env: Env) {
       `<h2 style="margin-bottom:16px">订单详情</h2>
       <div class="card"><h3 style="margin-bottom:12px">订单信息</h3><dl class="detail-grid">
       <dt>订单号</dt><dd><code>${es(order.orderId)}</code></dd><dt>状态</dt><dd>${statusBadge(order.status)}</dd>
-      <dt>渠道</dt><dd>${es(order.channel)}</dd><dt>批次</dt><dd>${es(order.batchId || "-")}</dd>
+      <dt>渠道</dt><dd>${es(order.channel)}${order.externalInstanceId ? ` <span style="color:#888;font-size:12px">(instance: ${es(order.externalInstanceId.substring(0, 16))}...)</span>` : ""}</dd>
+      <dt>批次</dt><dd>${es(order.batchId || "-")}</dd>
       <dt>备注</dt><dd>${es(order.notes || "-")}</dd><dt>创建时间</dt><dd>${order.createdAt || "-"}</dd>
       <dt>使用时间</dt><dd>${order.usedAt || "-"}</dd></dl></div>
       ${ent ? `<div class="card"><h3 style="margin-bottom:12px">授权信息</h3><dl class="detail-grid">

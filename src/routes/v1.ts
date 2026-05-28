@@ -102,7 +102,7 @@ export function createV1Router(db: Database, config: AppConfig): Hono {
     }
 
     try {
-      await deactivateOrder(db, {
+      await deactivateOrder(db, config, {
         orderId: body.order_id || "",
         fingerprint: body.fingerprint || "",
         ipAddress: ip,

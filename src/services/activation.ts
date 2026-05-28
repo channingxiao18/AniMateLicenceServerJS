@@ -14,6 +14,12 @@ import {
   generateOrderId,
   OrderIdValidationError,
 } from "../licence/order_id";
+import {
+  creemActivate,
+  creemDeactivate,
+  isCreemKey,
+  CreemApiError,
+} from "./creem";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -119,6 +125,294 @@ function checkAppVersion(product: typeof products.$inferSelect, appVersion: stri
   }
 }
 
+// ─── Activate (Creem) ─────────────────────────────────────────────────────
+
+async function activateCreemOrder(
+  db: Database,
+  config: AppConfig,
+  params: {
+    orderId: string;
+    fingerprint: string;
+    appVersion: string | null;
+    platform: string | null;
+    ipAddress: string;
+  }
+): Promise<{ licence: string; entitlement: Record<string, unknown> }> {
+  const key = params.orderId.trim();
+
+  // 1. Check local DB for existing record
+  const existingOrder = await db
+    .select()
+    .from(orders)
+    .where(eq(orders.orderId, key))
+    .get();
+
+  if (existingOrder) {
+    if (existingOrder.status === "revoked") {
+      throw new ActivationError("ORDER_REVOKED", "订单已作废", 403);
+    }
+
+    const existingEnt = await db
+      .select()
+      .from(entitlements)
+      .where(eq(entitlements.id, existingOrder.entitlementId))
+      .get();
+
+    if (!existingEnt) {
+      throw new ActivationError("ORDER_NOT_FOUND", "授权记录不存在", 404);
+    }
+
+    if (existingEnt.status === "deactivated") {
+      throw new ActivationError("ENTITLEMENT_DEACTIVATED", "授权已停用", 403);
+    }
+
+    if (existingEnt.status === "revoked") {
+      throw new ActivationError("ORDER_REVOKED", "订单已作废", 403);
+    }
+
+    if (existingOrder.status === "used") {
+      // Re-issue: must be same device
+      if (existingEnt.fingerprint !== params.fingerprint) {
+        throw new ActivationError(
+          "ORDER_ALREADY_USED",
+          "订单已绑定其他设备",
+          409
+        );
+      }
+      if (existingEnt.status !== "active") {
+        throw new ActivationError("ENTITLEMENT_DEACTIVATED", "授权已停用", 403);
+      }
+
+      // Re-issue: lookup product, issue licence, log, return
+      const product = await db
+        .select()
+        .from(products)
+        .where(eq(products.productId, existingEnt.productId))
+        .get();
+
+      if (!product) {
+        throw new ActivationError("ORDER_NOT_FOUND", "产品不存在", 404);
+      }
+
+      checkAppVersion(product, params.appVersion);
+
+      const auth = createAuthInfo({
+        productId: product.productId,
+        edition: product.edition,
+        tier: product.tier,
+        features: JSON.parse(product.featuresJson || "[]"),
+        maxAppMajor: product.maxAppMajor,
+        validDay: 0,
+      });
+
+      const licenceStr = await issueLicence(
+        params.fingerprint,
+        auth,
+        config.rsaPrivateKeyPkcs8Hex
+      );
+
+      await writeActivationLog(db, {
+        orderId: existingOrder.orderId,
+        entitlementId: existingEnt.id,
+        fingerprint: params.fingerprint,
+        action: "activate_reissue",
+        ipAddress: params.ipAddress,
+        responseCode: 200,
+        detail: { platform: params.platform, app_version: params.appVersion, channel: "creem" },
+      });
+
+      return {
+        licence: licenceStr,
+        entitlement: {
+          type: product.type,
+          edition: existingEnt.edition,
+          tier: existingEnt.tier,
+          features: JSON.parse(existingEnt.featuresJson || "[]"),
+          max_app_major: existingEnt.maxAppMajor,
+          valid_until: null,
+          product_id: product.productId,
+        },
+      };
+    }
+
+    // Order exists, not "used" — could be "unused" after admin unbind
+    // Treat as re-activation: call Creem API again to get a new instance
+    if (existingOrder.status !== "unused") {
+      throw new ActivationError("ORDER_NOT_FOUND", "订单状态异常", 404);
+    }
+    // Fall through to Creem activate below, then update existing records
+  }
+
+  // 2. Call Creem API to activate (first time or re-activation after unbind)
+  if (!config.creemApiKey) {
+    throw new ActivationError(
+      "CREEM_NOT_CONFIGURED",
+      "Creem 未配置，请联系管理员",
+      500
+    );
+  }
+
+  let creemResult;
+  try {
+    creemResult = await creemActivate(
+      { apiKey: config.creemApiKey, testMode: config.creemTestMode },
+      key,
+      params.fingerprint
+    );
+  } catch (err) {
+    if (err instanceof CreemApiError) {
+      throw new ActivationError(
+        "CREEM_ACTIVATION_FAILED",
+        `Creem 激活失败: ${err.message}`,
+        err.statusCode >= 400 && err.statusCode < 500 ? 400 : 502
+      );
+    }
+    throw err;
+  }
+
+  if (!creemResult.instance?.id) {
+    throw new ActivationError(
+      "CREEM_ACTIVATION_FAILED",
+      "Creem 未返回 instance ID",
+      502
+    );
+  }
+
+  // 3. Load product
+  const product = await db
+    .select()
+    .from(products)
+    .where(eq(products.productId, config.creemDefaultProductId))
+    .get();
+
+  if (!product) {
+    throw new ActivationError("ORDER_NOT_FOUND", "默认产品不存在", 404);
+  }
+
+  if (!product.isActive) {
+    throw new ActivationError("PRODUCT_INACTIVE", "产品 SKU 已下架", 403);
+  }
+
+  checkAppVersion(product, params.appVersion);
+
+  // 4. Create or update entitlement + order records
+  const now = nowISO();
+  const meta = {
+    platform: params.platform,
+    app_version: params.appVersion,
+  };
+
+  let entitlementId: number;
+
+  if (existingOrder) {
+    // Re-activation after unbind: update existing records
+    await db
+      .update(orders)
+      .set({
+        status: "used",
+        usedAt: now,
+        externalInstanceId: creemResult.instance.id,
+      })
+      .where(eq(orders.orderId, key));
+
+    await db
+      .update(entitlements)
+      .set({
+        status: "active",
+        fingerprint: params.fingerprint,
+        validFrom: now,
+        validUntil: null,
+        edition: product.edition,
+        tier: product.tier,
+        featuresJson: product.featuresJson,
+        maxAppMajor: product.maxAppMajor,
+        metadataJson: JSON.stringify(meta),
+      })
+      .where(eq(entitlements.id, existingOrder.entitlementId));
+
+    entitlementId = existingOrder.entitlementId;
+  } else {
+    // First time: insert new records
+    const [insertedEnt] = await db
+      .insert(entitlements)
+      .values({
+        productId: product.productId,
+        edition: product.edition,
+        tier: product.tier,
+        featuresJson: product.featuresJson,
+        maxAppMajor: product.maxAppMajor,
+        sourceChannel: "creem",
+        externalRef: key,
+        status: "active",
+        fingerprint: params.fingerprint,
+        validFrom: now,
+        validUntil: null,
+        metadataJson: JSON.stringify(meta),
+      })
+      .returning({ id: entitlements.id });
+
+    if (!insertedEnt?.id) {
+      throw new ActivationError("SERVER_ERROR", "创建授权记录失败", 500);
+    }
+
+    await db.insert(orders).values({
+      orderId: key,
+      entitlementId: insertedEnt.id,
+      status: "used",
+      channel: "creem",
+      externalInstanceId: creemResult.instance.id,
+      usedAt: now,
+    });
+
+    entitlementId = insertedEnt.id;
+  }
+
+  // 5. Issue licence
+  const auth = createAuthInfo({
+    productId: product.productId,
+    edition: product.edition,
+    tier: product.tier,
+    features: JSON.parse(product.featuresJson || "[]"),
+    maxAppMajor: product.maxAppMajor,
+    validDay: 0,
+  });
+
+  const licenceStr = await issueLicence(
+    params.fingerprint,
+    auth,
+    config.rsaPrivateKeyPkcs8Hex
+  );
+
+  // 6. Log
+  await writeActivationLog(db, {
+    orderId: key,
+    entitlementId,
+    fingerprint: params.fingerprint,
+    action: "activate_success",
+    ipAddress: params.ipAddress,
+    responseCode: 200,
+    detail: {
+      platform: params.platform,
+      app_version: params.appVersion,
+      channel: "creem",
+      instance_id: creemResult.instance.id,
+    },
+  });
+
+  return {
+    licence: licenceStr,
+    entitlement: {
+      type: product.type,
+      edition: product.edition,
+      tier: product.tier,
+      features: JSON.parse(product.featuresJson || "[]"),
+      max_app_major: product.maxAppMajor,
+      valid_until: null,
+      product_id: product.productId,
+    },
+  };
+}
+
 // ─── Activate ────────────────────────────────────────────────────────────
 
 export async function activateOrder(
@@ -134,6 +428,11 @@ export async function activateOrder(
 ): Promise<{ licence: string; entitlement: Record<string, unknown> }> {
   if (!params.fingerprint.trim()) {
     throw new ActivationError("INVALID_REQUEST", "fingerprint 不能为空", 400);
+  }
+
+  // Branch: Creem key vs legacy AM- format
+  if (isCreemKey(params.orderId)) {
+    return activateCreemOrder(db, config, params);
   }
 
   let orderId: string;
@@ -266,6 +565,7 @@ export async function activateOrder(
 
 export async function deactivateOrder(
   db: Database,
+  config: AppConfig,
   params: {
     orderId: string;
     fingerprint: string;
@@ -285,6 +585,42 @@ export async function deactivateOrder(
 
   if ((entitlement.status as string) === "revoked" || (order.status as string) === "revoked") {
     throw new ActivationError("ENTITLEMENT_REVOKED", "授权已作废", 403);
+  }
+
+  // If Creem key, call Creem API to deactivate
+  if (isCreemKey(params.orderId)) {
+    if (!config.creemApiKey) {
+      throw new ActivationError(
+        "CREEM_NOT_CONFIGURED",
+        "Creem 未配置，请联系管理员",
+        500
+      );
+    }
+
+    if (!order.externalInstanceId) {
+      throw new ActivationError(
+        "CREEM_ACTIVATION_FAILED",
+        "Creem instance ID 缺失",
+        500
+      );
+    }
+
+    try {
+      await creemDeactivate(
+        { apiKey: config.creemApiKey, testMode: config.creemTestMode },
+        params.orderId.trim(),
+        order.externalInstanceId
+      );
+    } catch (err) {
+      if (err instanceof CreemApiError) {
+        throw new ActivationError(
+          "CREEM_DEACTIVATION_FAILED",
+          `Creem 停用失败: ${err.message}`,
+          err.statusCode >= 400 && err.statusCode < 500 ? 400 : 502
+        );
+      }
+      throw err;
+    }
   }
 
   await db

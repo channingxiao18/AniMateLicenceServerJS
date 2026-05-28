@@ -56,6 +56,7 @@ export const orders = sqliteTable("orders", {
   channel: text("channel").notNull().default("wechat_order"),
   batchId: text("batch_id"),
   notes: text("notes"),
+  externalInstanceId: text("external_instance_id"),
   createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
   usedAt: text("used_at"),
 });
