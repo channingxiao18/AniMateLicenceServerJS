@@ -5,7 +5,6 @@
  */
 
 import { Hono } from "hono";
-import { cors } from "hono/cors";
 import { eq } from "drizzle-orm";
 import { createDb } from "./db/index";
 import { seedDefaultProduct } from "./db/seed";
@@ -107,14 +106,6 @@ async function initApp(env: Env) {
   await seedDefaultProduct(db);
   const config = loadConfig(env as unknown as Record<string, string | undefined>);
   const app = new Hono();
-
-  // CORS
-  app.use("/v1/*", cors({
-    origin: config.corsOrigins,
-    allowMethods: ["GET", "POST", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization"],
-    maxAge: 86400,
-  }));
 
   // ── Public ──────────────────────────────────────────────────────────────
 
@@ -347,15 +338,45 @@ async function initApp(env: Env) {
 // Lazy init, cached per isolate
 let appPromise: Promise<Hono> | null = null;
 
+const corsHeaders: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Max-Age": "86400",
+};
+
+function addCors(response: Response): Response {
+  const headers = new Headers(response.headers);
+  for (const [key, value] of Object.entries(corsHeaders)) {
+    if (!headers.has(key)) headers.set(key, value);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
+      // Handle CORS preflight at the Worker level (before Hono)
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders });
+      }
+
       if (!appPromise) appPromise = initApp(env);
       const app = await appPromise;
-      return app.fetch(request);
+      const response = await app.fetch(request);
+
+      // Add CORS headers to every response
+      return addCors(response);
     } catch (err) {
       const msg = err instanceof Error ? err.message + "\n" + err.stack : String(err);
-      return new Response(msg, { status: 500, headers: { "Content-Type": "text/plain" } });
+      return new Response(msg, {
+        status: 500,
+        headers: { "Content-Type": "text/plain", ...corsHeaders },
+      });
     }
   },
 };
