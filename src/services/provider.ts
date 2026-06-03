@@ -75,25 +75,32 @@ export interface ProviderRegistry {
 
   /** Register an adapter. */
   register(adapter: ProviderAdapter): void;
+
+  /** Return all registered adapters in registration order. */
+  listAll(): ProviderAdapter[];
 }
 
 export function createProviderRegistry(): ProviderRegistry {
-  const byName = new Map<string, ProviderAdapter>();
+  const adapters: ProviderAdapter[] = [];
 
   return {
     identifyProvider(key: string): ProviderAdapter | null {
-      for (const adapter of byName.values()) {
+      for (const adapter of adapters) {
         if (adapter.identifiesKey(key)) return adapter;
       }
       return null;
     },
 
     get(name: string): ProviderAdapter | undefined {
-      return byName.get(name);
+      return adapters.find((a) => a.name === name);
     },
 
     register(adapter: ProviderAdapter): void {
-      byName.set(adapter.name, adapter);
+      adapters.push(adapter);
+    },
+
+    listAll(): ProviderAdapter[] {
+      return [...adapters];
     },
   };
 }

@@ -113,12 +113,17 @@ export async function creemDeactivate(
 }
 
 /**
- * Detect whether an order ID is a Creem license key.
- * Returns true for anything that doesn't match the legacy AM- format.
+ * Detect whether a raw string is a Creem license key.
+ *
+ * Creem keys use a 5-group dash-separated format:
+ *   40TJ0-U89OC-8843Y-37N0L-OU2D6
+ *
+ * Each group is 5 alphanumeric chars, 5 groups total.
  */
+const CREEM_KEY_RE = /^[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}$/i;
+
 function isCreemKey(raw: string): boolean {
-  const trimmed = raw.trim().toUpperCase();
-  return !/^AM-[0-9A-Z]{12}$/.test(trimmed) && trimmed.length > 0;
+  return CREEM_KEY_RE.test(raw.trim());
 }
 
 function toWebhookSecret(apiKey: string): string {

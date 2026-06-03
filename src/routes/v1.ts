@@ -15,6 +15,8 @@ import {
 import type { ProviderRegistry } from "../services/provider";
 import { createRateLimiter } from "../middleware/rate_limit";
 import type { ActivateRateLimiter } from "../services/rate_limit";
+import { getAesKey, aesDecrypt } from "../crypto/aes";
+import { parseLicenceOuter, parseLicenceInner } from "../licence/codec";
 
 type ClientBody = {
   product_id?: string;
@@ -25,6 +27,8 @@ type ClientBody = {
   machine_name?: string;
   app_version?: string;
   platform?: string;
+  /** Signed licence token — required for deactivate to prove device ownership. */
+  licence_token?: string;
 };
 
 function readClientBody(body: ClientBody) {
@@ -35,11 +39,79 @@ function readClientBody(body: ClientBody) {
     machineName: body.machine_name || null,
     appVersion: body.app_version || null,
     platform: body.platform || null,
+    licenceToken: body.licence_token || null,
   };
 }
 
 function statusFor(err: ActivationError): 400 | 403 | 404 | 409 | 429 | 500 | 502 {
   return err.statusCode as 400 | 403 | 404 | 409 | 429 | 500 | 502;
+}
+
+/**
+ * Decrypt the signed licence token using the server-side AES key and extract
+ * the fingerprint it was issued for. Returns null when no token provided.
+ *
+ * This is a lightweight proof-of-possession check: only the activated device
+ * holds a valid licence token containing its fingerprint. No RSA verification
+ * needed — the AES key is a server-only secret.
+ */
+async function verifyLicenceTokenFingerprint(
+  licenceToken: string | null,
+  licenseKey: string
+): Promise<string | null> {
+  if (!licenceToken) {
+    throw new ActivationError(
+      "LICENCE_TOKEN_REQUIRED",
+      "解绑设备需要提供当前有效的 licence_token，请升级客户端",
+      400
+    );
+  }
+
+  // Parse outer: IV(32) + LEN(8) + CT + SIG
+  let iv: string, ciphertextHex: string;
+  try {
+    [iv, ciphertextHex] = parseLicenceOuter(licenceToken);
+  } catch {
+    throw new ActivationError(
+      "LICENCE_TOKEN_INVALID",
+      "licence_token 格式无效",
+      400
+    );
+  }
+
+  // Decrypt inner plaintext using server-side AES key.
+  let inner: string;
+  try {
+    inner = await aesDecrypt(getAesKey(), iv, ciphertextHex);
+  } catch {
+    throw new ActivationError(
+      "LICENCE_TOKEN_INVALID",
+      "licence_token 解密失败，可能已损坏或过期",
+      400
+    );
+  }
+
+  // Parse inner: AUTH_LEN(8) + AUTH_JSON + FP_LEN(8) + FINGERPRINT
+  let fingerprint: string;
+  try {
+    [, fingerprint] = parseLicenceInner(inner);
+  } catch {
+    throw new ActivationError(
+      "LICENCE_TOKEN_INVALID",
+      "licence_token 内层解析失败",
+      400
+    );
+  }
+
+  if (!fingerprint || fingerprint.length < 4) {
+    throw new ActivationError(
+      "LICENCE_TOKEN_INVALID",
+      "licence_token 中的设备指纹无效",
+      400
+    );
+  }
+
+  return fingerprint;
 }
 
 export function createV1Router(db: Database, config: AppConfig, registry: ProviderRegistry): Hono {
@@ -102,6 +174,19 @@ export function createV1Router(db: Database, config: AppConfig, registry: Provid
     }
 
     const request = readClientBody(body);
+
+    // Verify the caller holds a valid licence token for this device.
+    const licenceFingerprint = await verifyLicenceTokenFingerprint(
+      body.licence_token || null,
+      request.licenseKey
+    );
+    if (licenceFingerprint && licenceFingerprint !== request.fingerprint) {
+      return c.json({
+        error: "FINGERPRINT_MISMATCH",
+        message: "licence_token 中的设备指纹与请求不匹配",
+      }, 403);
+    }
+
     try {
       return c.json(
         await refreshLicence(db, config, {
@@ -133,12 +218,21 @@ export function createV1Router(db: Database, config: AppConfig, registry: Provid
     }
 
     const request = readClientBody(body);
+
+    // Security: verify the client holds a valid licence token issued for this fingerprint.
+    // This prevents attackers who only know license_key + fingerprint from deactivating devices.
+    const licenceFingerprint = await verifyLicenceTokenFingerprint(
+      body.licence_token || null,
+      request.licenseKey
+    );
+
     try {
       await deactivateOrder(db, config, registry, {
         productId: request.productId,
         licenseKey: request.licenseKey,
         fingerprint: request.fingerprint,
         ipAddress: ip,
+        expectedFingerprint: licenceFingerprint, // must match request fingerprint
       });
       return c.json({ status: "ok" });
     } catch (err) {

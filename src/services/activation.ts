@@ -24,7 +24,7 @@ import {
   OrderIdValidationError,
   validateOrderId,
 } from "../licence/order_id";
-import type { ProviderRegistry } from "./provider";
+import type { ProviderAdapter, ProviderRegistry, ExternalActivationResult } from "./provider";
 
 export class ActivationError extends Error {
   error: string;
@@ -338,13 +338,7 @@ async function ensureExternalLicence(
     // Not a valid AM- key — proceed to external provider identification.
   }
 
-  // Try provider identification.
-  const adapter = registry.identifyProvider(params.licenseKey);
-  if (!adapter) {
-    throw new ActivationError("INVALID_KEY_FORMAT", "授权码格式无效", 400);
-  }
-
-  // Check if already imported.
+  // Check if already imported from a previous activation.
   const existing = await db
     .select()
     .from(licenses)
@@ -352,17 +346,71 @@ async function ensureExternalLicence(
     .get();
   if (existing) return existing.channel;
 
-  // Call the provider to validate and get product info.
-  let result;
+  // Phase 1: format-based identification — try the best-match adapter first.
+  // Phase 2: if Phase 1's adapter failed or no format match, poll every
+  // registered adapter by calling its real API. First to accept the key wins.
+  const matchedAdapter = registry.identifyProvider(params.licenseKey);
+  const errors: string[] = [];
+  const tried = new Set<string>();
+
+  if (matchedAdapter) {
+    tried.add(matchedAdapter.name);
+    try {
+      return tryActivateWithAdapter(
+        db, config, matchedAdapter,
+        params.licenseKey, params.fingerprint,
+        params.platform, params.appVersion,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`${matchedAdapter.name}: ${msg}`);
+      // Fall through to polling — Phase 1 failed.
+    }
+  }
+
+  // Phase 2: poll remaining adapters (skip the one already tried).
+  for (const adapter of registry.listAll()) {
+    if (tried.has(adapter.name)) continue;
+    try {
+      return tryActivateWithAdapter(
+        db, config, adapter,
+        params.licenseKey, params.fingerprint,
+        params.platform, params.appVersion,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`${adapter.name}: ${msg}`);
+    }
+  }
+
+  throw new ActivationError(
+    "INVALID_KEY_FORMAT",
+    errors.length
+      ? `授权码验证失败（已尝试: ${errors.join("; ")}）`
+      : "授权码格式无效，未找到匹配的支付平台",
+    400,
+  );
+}
+
+async function tryActivateWithAdapter(
+  db: Database,
+  config: AppConfig,
+  adapter: ProviderAdapter,
+  licenseKey: string,
+  fingerprint: string,
+  platform: string | null,
+  appVersion: string | null,
+): Promise<string> {
+  let result: ExternalActivationResult;
   try {
-    result = await adapter.activate(params.licenseKey, params.fingerprint);
+    result = await adapter.activate(licenseKey, fingerprint);
   } catch (err) {
     if (err instanceof ActivationError) throw err;
     const message = err instanceof Error ? err.message : "未知错误";
     throw new ActivationError(
       "PROVIDER_ACTIVATION_FAILED",
       `${adapter.name} 激活失败: ${message}`,
-      502
+      502,
     );
   }
 
@@ -371,20 +419,20 @@ async function ensureExternalLicence(
     db,
     adapter.name,
     result.externalProductId,
-    config.creemDefaultPlanId
+    config.creemDefaultPlanId,
   );
   await createEntitlementAndLicense(db, {
-    licenseKey: params.licenseKey,
+    licenseKey,
     plan,
     sourceProvider: adapter.name,
     sourceChannel: adapter.name,
     status: "pending",
-    externalRef: params.licenseKey,
+    externalRef: licenseKey,
     externalInstanceId: result.instanceId,
     metadata: {
       ...(result.metadata || {}),
-      app_version: params.appVersion,
-      platform: params.platform,
+      app_version: appVersion,
+      platform,
     },
   });
 
@@ -425,6 +473,7 @@ async function upsertActivation(
           platform: params.platform,
           appVersion: params.appVersion,
           machineName: params.machineName || existing.machineName,
+          licenceIssuedAt: now,
           lastSeenAt: now,
           deactivatedAt: null,
         })
@@ -436,6 +485,7 @@ async function upsertActivation(
           platform: params.platform,
           appVersion: params.appVersion,
           machineName: params.machineName || existing.machineName,
+          licenceIssuedAt: now,
           lastSeenAt: now,
         })
         .where(eq(activations.id, existing.id));
@@ -464,6 +514,7 @@ async function upsertActivation(
       platform: params.platform,
       appVersion: params.appVersion,
       status: "active",
+      licenceIssuedAt: now,
       lastSeenAt: now,
     })
     .returning({ id: activations.id });
@@ -714,12 +765,13 @@ export async function refreshLicence(
     throw new ActivationError("DEVICE_NOT_ACTIVATED", "当前设备尚未激活", 403);
   }
 
-  // Bug #6 fix: enforce refresh_interval_days as a minimum interval between refresh calls.
-  if (bundle.plan.refreshIntervalDays && activation.lastSeenAt) {
-    const lastSeen = parseDate(activation.lastSeenAt);
-    if (lastSeen) {
+  // Bug #6 fix: enforce refresh_interval_days based on last refresh time.
+  const lastRefresh = activation.lastRefreshAt || activation.lastSeenAt;
+  if (bundle.plan.refreshIntervalDays && lastRefresh) {
+    const lastRefreshDate = parseDate(lastRefresh);
+    if (lastRefreshDate) {
       const nextAllowed = new Date(
-        lastSeen.getTime() + bundle.plan.refreshIntervalDays * 86_400_000
+        lastRefreshDate.getTime() + bundle.plan.refreshIntervalDays * 86_400_000
       );
       if (new Date() < nextAllowed) {
         throw new ActivationError(
@@ -733,7 +785,7 @@ export async function refreshLicence(
 
   await db
     .update(activations)
-    .set({ lastSeenAt: nowISO(), appVersion: params.appVersion, platform: params.platform })
+    .set({ lastRefreshAt: nowISO(), lastSeenAt: nowISO(), appVersion: params.appVersion, platform: params.platform })
     .where(eq(activations.id, activation.id));
 
   const licence = await issueBundleLicence(config, bundle, fingerprint);
@@ -761,6 +813,8 @@ export async function deactivateOrder(
     fingerprint: string;
     ipAddress: string;
     action?: string;
+    /** Set by the route handler after verifying the licence token. */
+    expectedFingerprint?: string | null;
   }
 ): Promise<void> {
   const licenseKey = (params.licenseKey || params.orderId || "").trim();
@@ -770,6 +824,18 @@ export async function deactivateOrder(
 
   if (!bundle.plan.allowSelfDeactivate && params.action !== "deactivate_admin") {
     throw new ActivationError("SELF_DEACTIVATE_DISABLED", "当前套餐不允许客户端自助解绑", 403);
+  }
+
+  // Security gate for client self-deactivation: the licence token fingerprint
+  // must match the request fingerprint. Admin bypasses this check.
+  if (params.expectedFingerprint && params.action !== "deactivate_admin") {
+    if (params.expectedFingerprint !== params.fingerprint) {
+      throw new ActivationError(
+        "FINGERPRINT_MISMATCH",
+        "licence_token 中的设备指纹与请求不匹配，解绑被拒绝",
+        403
+      );
+    }
   }
 
   const activation = await db

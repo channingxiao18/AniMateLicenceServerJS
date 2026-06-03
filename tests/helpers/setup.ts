@@ -95,6 +95,8 @@ CREATE TABLE IF NOT EXISTS activations (
   app_version text,
   status text DEFAULT 'active' NOT NULL,
   activated_at text DEFAULT (datetime('now')) NOT NULL,
+  licence_issued_at text,
+  last_refresh_at text,
   last_seen_at text,
   deactivated_at text,
   metadata_json text

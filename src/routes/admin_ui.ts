@@ -69,7 +69,7 @@ const navItems = [
   ["/admin/", "仪表板"],
   ["/admin/products", "产品"],
   ["/admin/plans", "套餐"],
-  ["/admin/licenses", "授权码"],
+  ["/admin/licenses", "兑换码"],
   ["/admin/entitlements", "授权权益"],
   ["/admin/subscriptions", "订阅"],
   ["/admin/providers", "支付映射"],
@@ -134,7 +134,7 @@ export async function renderAdminDashboard(db: Database, successMessage = ""): P
   const cards = [
     ["产品", stats.products],
     ["套餐", stats.plans],
-    ["授权码", stats.licenses],
+    ["兑换码", stats.licenses],
     ["活跃权益", stats.active_entitlements],
     ["激活设备", stats.active_devices],
     ["订阅", stats.subscriptions],
@@ -147,7 +147,7 @@ export async function renderAdminDashboard(db: Database, successMessage = ""): P
   return shell(
     "仪表板",
     "/admin/",
-    `${successMessage ? `<div class="flash">${e(successMessage)}</div>` : ""}<div class="grid stats">${cards}</div><div class="toolbar"><h2>产品报表</h2></div><table><thead><tr><th>产品 ID</th><th>产品</th><th>状态</th><th>套餐数</th><th>授权码</th><th>活跃权益</th><th>激活设备</th><th>作废</th></tr></thead><tbody>${rows || `<tr><td colspan="8" class="muted">暂无数据</td></tr>`}</tbody></table>`
+    `${successMessage ? `<div class="flash">${e(successMessage)}</div>` : ""}<div class="grid stats">${cards}</div><div class="toolbar"><h2>产品报表</h2></div><table><thead><tr><th>产品 ID</th><th>产品</th><th>状态</th><th>套餐数</th><th>兑换码</th><th>活跃权益</th><th>激活设备</th><th>作废</th></tr></thead><tbody>${rows || `<tr><td colspan="8" class="muted">暂无数据</td></tr>`}</tbody></table>`
   );
 }
 
@@ -199,7 +199,7 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
       `<div><label>产品 ID</label><input name="product_id" placeholder="animate" required></div><div><label>产品名称</label><input name="name" placeholder="AniMate" required></div><div><label>状态</label><select name="status"><option value="active">active</option><option value="inactive">inactive</option></select></div>`,
       "创建"
     );
-    return c.html(shell("产品", "/admin/products", `${flash(c)}<div class="toolbar"><div class="muted">管理产品、停用产品，并查看每个产品的授权表现。</div><a class="btn primary" href="#create-product">新建产品</a></div><table><thead><tr><th>产品 ID</th><th>名称</th><th>状态</th><th>套餐</th><th>授权码</th><th>激活设备</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="7" class="muted">暂无产品</td></tr>`}</tbody></table>${createProductModal}`));
+    return c.html(shell("产品", "/admin/products", `${flash(c)}<div class="toolbar"><div class="muted">管理产品、停用产品，并查看每个产品的授权表现。</div><a class="btn primary" href="#create-product">新建产品</a></div><table><thead><tr><th>产品 ID</th><th>名称</th><th>状态</th><th>套餐</th><th>兑换码</th><th>激活设备</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="7" class="muted">暂无产品</td></tr>`}</tbody></table>${createProductModal}`));
   });
 
   router.get("/plans", async (c) => {
@@ -241,12 +241,12 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
       .join("");
     const createLicenseModal = modal(
       "create-license",
-      "生成授权码",
+      "生成兑换码",
       "/admin/api/licenses/batch",
       `<div><label>套餐</label><select name="plan_id">${planOptions}</select></div><div><label>数量</label><input name="count" type="number" value="10" min="1" max="1000"></div><div><label>客户邮箱</label><input name="customer_email"></div><div><label>批次</label><input name="batch_id"></div><div><label>备注</label><input name="notes"></div>`,
       "生成"
     );
-    return c.html(shell("授权码", "/admin/licenses", `${flash(c)}<div class="toolbar"><form method="get" class="actions"><input name="search" value="${e(search)}" placeholder="搜索授权码/邮箱" style="width:220px"><button>搜索</button></form><a class="btn primary" href="#create-license">生成授权码</a><a class="btn" href="#batch-ops">批量操作</a></div><table><thead><tr><th>授权码</th><th>状态</th><th>产品</th><th>套餐</th><th>权益</th><th>来源</th><th>创建时间</th></tr></thead><tbody>${rows || `<tr><td colspan="7" class="muted">暂无授权码</td></tr>`}</tbody></table>${createLicenseModal}${modal("batch-ops","批量操作","/admin/api/licenses/batch/suspend",`<div><label>授权码列表 (每行一个或逗号分隔)</label><textarea name="license_keys" rows="6" placeholder="AM-XXXXXXXXXXXX&#10;AM-YYYYYYYYYYYY" required></textarea></div><div><label>操作类型</label><div class="actions" style="margin-top:6px"><button formaction="/admin/api/licenses/batch/suspend">批量暂停</button><button formaction="/admin/api/licenses/batch/revoke" class="danger">批量作废</button><button formaction="/admin/api/licenses/batch/reactivate">批量恢复</button></div></div>`,"执行")}`));
+    return c.html(shell("兑换码", "/admin/licenses", `${flash(c)}<div class="toolbar"><form method="get" class="actions"><input name="search" value="${e(search)}" placeholder="搜索兑换码/邮箱" style="width:220px"><button>搜索</button></form><a class="btn primary" href="#create-license">生成兑换码</a><a class="btn" href="#batch-ops">批量操作</a></div><table><thead><tr><th>兑换码</th><th>状态</th><th>产品</th><th>套餐</th><th>权益</th><th>来源</th><th>创建时间</th></tr></thead><tbody>${rows || `<tr><td colspan="7" class="muted">暂无兑换码</td></tr>`}</tbody></table>${createLicenseModal}${modal("batch-ops","批量操作","/admin/api/licenses/batch/suspend",`<div><label>兑换码列表 (每行一个或逗号分隔)</label><textarea name="license_keys" rows="6" placeholder="AM-XXXXXXXXXXXX&#10;AM-YYYYYYYYYYYY" required></textarea></div><div><label>操作类型</label><div class="actions" style="margin-top:6px"><button formaction="/admin/api/licenses/batch/suspend">批量暂停</button><button formaction="/admin/api/licenses/batch/revoke" class="danger">批量作废</button><button formaction="/admin/api/licenses/batch/reactivate">批量恢复</button></div></div>`,"执行")}`));
   });
 
   router.get("/providers", async (c) => {
@@ -280,7 +280,12 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     const effectiveMax = overrideMax || plan.maxActivations;
     const activeCount = devices.filter((d) => d.status === "active").length;
 
-    const deviceRows = devices.map((d) => `<tr><td>${e(d.fingerprint)}</td><td>${badge(d.status)}</td><td>${e(d.platform || "-")}</td><td>${e(d.appVersion || "-")}</td><td>${e(d.activatedAt)}</td><td>${e(d.lastSeenAt || "-")}</td><td class="actions">${d.status === "active" ? `<form method="post" action="/admin/api/activations/${d.id}/unbind"><button class="danger">解绑</button></form>` : ""}</td></tr>`).join("");
+    const deviceRows = devices.map((d) => {
+      const issued = d.licenceIssuedAt || d.activatedAt || "-";
+      const refreshed = d.lastRefreshAt || "-";
+      const seen = d.lastSeenAt || "-";
+      return `<tr><td><code>${e(d.fingerprint)}</code></td><td>${badge(d.status)}</td><td>${e(d.platform || "-")}</td><td>${e(d.appVersion || "-")}</td><td>${e(issued)}</td><td>${e(refreshed)}</td><td>${e(seen)}</td><td class="actions">${d.status === "active" ? `<form method="post" action="/admin/api/activations/${d.id}/unbind"><button class="danger">解绑</button></form>` : ""}</td></tr>`;
+    }).join("");
 
     // Subscription card with actions.
     const subscriptionCard = subscription
@@ -297,12 +302,12 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
          </div></div>`
       : "";
 
-    return c.html(shell("授权详情", "/admin/licenses", `<h2><code>${e(license.licenseKey)}</code></h2><div class="card"><div class="grid stats"><div><b>产品</b><br>${e(product.name)} (${e(product.productId)})</div><div><b>套餐</b><br>${e(plan.name)} (${e(plan.planId)})</div><div><b>授权状态</b><br>${badge(entitlement.status)}</div><div><b>授权码状态</b><br>${badge(license.status)}</div><div><b>有效期</b><br>${e(entitlement.validUntil || "永久")}</div><div><b>来源</b><br>${e(entitlement.sourceProvider)} / ${e(license.channel)}</div><div><b>设备</b><br>${activeCount} / ${effectiveMax}${overrideMax ? ` <span class="#muted">(套餐${plan.maxActivations})</span>` : ""}</div></div></div><div class="card actions"><form method="post" action="/admin/api/licenses/${encodeURIComponent(license.licenseKey)}/unbind"><button>解绑全部设备</button></form><form method="post" action="/admin/api/licenses/${encodeURIComponent(license.licenseKey)}/suspend"><button>暂停</button></form><form method="post" action="/admin/api/licenses/${encodeURIComponent(license.licenseKey)}/reactivate"><button>恢复</button></form><form method="post" action="/admin/api/licenses/${encodeURIComponent(license.licenseKey)}/revoke"><button class="danger">作废</button></form><form method="post" action="/admin/api/entitlements/${entitlement.id}/extend" class="actions"><input name="days" type="number" value="30" style="width:90px"><button>延长天数</button></form><form method="post" action="/admin/api/entitlements/${entitlement.id}/increase-devices" class="actions" style="margin-top:6px"><input name="max_activations" type="number" value="${effectiveMax}" min="1" max="1000" style="width:90px"><button>设置设备上限</button></form></div>${subscriptionCard}<h3>设备</h3><table><thead><tr><th>机器 ID</th><th>状态</th><th>平台</th><th>版本</th><th>激活时间</th><th>最后在线</th><th>操作</th></tr></thead><tbody>${deviceRows || `<tr><td colspan="7" class="muted">暂无设备</td></tr>`}</tbody></table>`));
+    return c.html(shell("兑换码详情", "/admin/licenses", `<h2><code>${e(license.licenseKey)}</code></h2><div class="card"><div class="grid stats"><div><b>产品</b><br>${e(product.name)} (${e(product.productId)})</div><div><b>套餐</b><br>${e(plan.name)} (${e(plan.planId)})</div><div><b>权益状态</b><br>${badge(entitlement.status)}</div><div><b>兑换码状态</b><br>${badge(license.status)}</div><div><b>有效期</b><br>${e(entitlement.validUntil || "永久")}</div><div><b>兑换码来源</b><br>${e(entitlement.sourceProvider)}${license.channel !== entitlement.sourceProvider ? ` / ${e(license.channel)}` : ""}</div><div><b>设备</b><br>${activeCount} / ${effectiveMax}${overrideMax ? ` <span class="#muted">(套餐${plan.maxActivations})</span>` : ""}</div></div></div><div class="card actions"><form method="post" action="/admin/api/licenses/${encodeURIComponent(license.licenseKey)}/unbind"><button>解绑全部设备</button></form><form method="post" action="/admin/api/licenses/${encodeURIComponent(license.licenseKey)}/suspend"><button>暂停</button></form><form method="post" action="/admin/api/licenses/${encodeURIComponent(license.licenseKey)}/reactivate"><button>恢复</button></form><form method="post" action="/admin/api/licenses/${encodeURIComponent(license.licenseKey)}/revoke"><button class="danger">作废</button></form><form method="post" action="/admin/api/entitlements/${entitlement.id}/extend" class="actions"><input name="days" type="number" value="30" style="width:90px"><button>延长天数</button></form><form method="post" action="/admin/api/entitlements/${entitlement.id}/increase-devices" class="actions" style="margin-top:6px"><input name="max_activations" type="number" value="${effectiveMax}" min="1" max="1000" style="width:90px"><button>设置设备上限</button></form></div>${subscriptionCard}<h3>设备</h3><table><thead><tr><th>机器指纹</th><th>状态</th><th>系统</th><th>版本</th><th>签发令牌</th><th>最后刷新</th><th>最后在线</th><th>操作</th></tr></thead><tbody>${deviceRows || `<tr><td colspan="7" class="muted">暂无设备</td></tr>`}</tbody></table>`));
   });
 
   router.get("/entitlements", async (c) => {
     const rows = (await listEntitlements(db)).map((x) => `<tr><td>${x.id}</td><td>${e(x.productId)}</td><td>${e(x.planId)}</td><td>${badge(x.status)}</td><td>${e(x.customerEmail || "-")}</td><td>${e(x.validUntil || "永久")}</td><td>${e(x.sourceProvider)}</td></tr>`).join("");
-    return c.html(shell("授权权益", "/admin/entitlements", `<div class="toolbar"><div class="muted">用于排查授权码背后的内部权益状态、有效期和来源。</div></div><table><thead><tr><th>ID</th><th>产品</th><th>套餐</th><th>状态</th><th>邮箱</th><th>有效期</th><th>来源</th></tr></thead><tbody>${rows || `<tr><td colspan="7" class="muted">暂无权益</td></tr>`}</tbody></table>`));
+    return c.html(shell("授权权益", "/admin/entitlements", `<div class="toolbar"><div class="muted">用于排查兑换码背后的内部权益状态、有效期和来源。</div></div><table><thead><tr><th>ID</th><th>产品</th><th>套餐</th><th>状态</th><th>邮箱</th><th>有效期</th><th>来源</th></tr></thead><tbody>${rows || `<tr><td colspan="7" class="muted">暂无权益</td></tr>`}</tbody></table>`));
   });
 
   router.get("/subscriptions", async (c) => {
@@ -359,7 +364,7 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
           <div><b>状态</b><br>${badge(entitlement.status)}</div>
           <div><b>有效期</b><br>${e(entitlement.validUntil || "永久")}</div>
         </div>
-        ${license ? `<p>授权码: <a href="/admin/licenses/${encodeURIComponent(license.licenseKey)}"><code>${e(license.licenseKey)}</code></a></p>` : ""}
+        ${license ? `<p>兑换码: <a href="/admin/licenses/${encodeURIComponent(license.licenseKey)}"><code>${e(license.licenseKey)}</code></a></p>` : ""}
       </div>` : ""}
       <h3>设备 (${devices.filter((d) => d.status === "active").length} 活跃)</h3>
       <table><thead><tr><th>机器 ID</th><th>状态</th><th>平台</th><th>激活时间</th><th>最后在线</th></tr></thead><tbody>${deviceRows || `<tr><td colspan="5" class="muted">暂无设备</td></tr>`}</tbody></table>
@@ -371,7 +376,7 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     const activationRows = logs.items.map((l) => `<tr><td>${e(l.createdAt)}</td><td>${e(l.licenseKey || "-")}</td><td>${e(l.action)}</td><td>${e(l.fingerprint || "-")}</td><td>${l.responseCode}</td><td>${e(l.detail || "-")}</td></tr>`).join("");
     const webhookRows = (await listWebhookEvents(db)).map((x) => `<tr><td>${e(x.createdAt)}</td><td>${e(x.provider)}</td><td>${e(x.eventType)}</td><td>${badge(x.status)}</td><td>${e(x.errorMessage || "-")}</td><td class="actions">${x.status === "failed" ? `<form method="post" action="/admin/api/webhook-events/${x.id}/retry"><button>重试</button></form>` : ""}</td></tr>`).join("");
     const auditRows = (await listAuditLogs(db)).map((x) => `<tr><td>${e(x.createdAt)}</td><td>${e(x.actor)}</td><td>${e(x.action)}</td><td>${e(x.targetType)}:${e(x.targetId)}</td><td>${e(x.reason || "-")}</td></tr>`).join("");
-    return c.html(shell("日志", "/admin/logs", `<h3>激活日志</h3><table><thead><tr><th>时间</th><th>授权码</th><th>动作</th><th>机器</th><th>状态码</th><th>详情</th></tr></thead><tbody>${activationRows || `<tr><td colspan="6" class="muted">暂无日志</td></tr>`}</tbody></table><h3>Webhook 事件</h3><table><thead><tr><th>时间</th><th>平台</th><th>事件</th><th>状态</th><th>错误</th><th>操作</th></tr></thead><tbody>${webhookRows || `<tr><td colspan="6" class="muted">暂无事件</td></tr>`}</tbody></table><h3>审计日志</h3><table><thead><tr><th>时间</th><th>操作人</th><th>动作</th><th>对象</th><th>原因</th></tr></thead><tbody>${auditRows || `<tr><td colspan="5" class="muted">暂无审计</td></tr>`}</tbody></table>`));
+    return c.html(shell("日志", "/admin/logs", `<h3>激活日志</h3><table><thead><tr><th>时间</th><th>兑换码</th><th>动作</th><th>机器</th><th>状态码</th><th>详情</th></tr></thead><tbody>${activationRows || `<tr><td colspan="6" class="muted">暂无日志</td></tr>`}</tbody></table><h3>Webhook 事件</h3><table><thead><tr><th>时间</th><th>平台</th><th>事件</th><th>状态</th><th>错误</th><th>操作</th></tr></thead><tbody>${webhookRows || `<tr><td colspan="6" class="muted">暂无事件</td></tr>`}</tbody></table><h3>审计日志</h3><table><thead><tr><th>时间</th><th>操作人</th><th>动作</th><th>对象</th><th>原因</th></tr></thead><tbody>${auditRows || `<tr><td colspan="5" class="muted">暂无审计</td></tr>`}</tbody></table>`));
   });
 
   router.get("/orders", (c) => c.redirect("/admin/licenses"));

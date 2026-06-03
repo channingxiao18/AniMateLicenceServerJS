@@ -110,6 +110,8 @@ export const activations = sqliteTable(
     appVersion: text("app_version"),
     status: text("status").notNull().default("active"),
     activatedAt: text("activated_at").notNull().default(sql`(datetime('now'))`),
+    licenceIssuedAt: text("licence_issued_at"),
+    lastRefreshAt: text("last_refresh_at"),
     lastSeenAt: text("last_seen_at"),
     deactivatedAt: text("deactivated_at"),
     metadataJson: text("metadata_json"),

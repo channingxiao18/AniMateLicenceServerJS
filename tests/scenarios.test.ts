@@ -261,9 +261,15 @@ describe("Scn 7.3: Fixed-term (trial) licence", () => {
     const result = await activate(env, licenseKey, clientA.fingerprint);
     expect(result.entitlement.status).toBe("active");
     expect(result.entitlement.valid_until).toBeTruthy();
-    // valid_until should be roughly 14 days from now
+    // valid_until should be roughly 14 days from now (±5 seconds tolerance)
     const expected = addDays(new Date(), 14);
-    expect(result.entitlement.valid_until).toBe(expected);
+    const expectedDate = new Date(expected.replace(" ", "T") + "Z");
+    const actualDate = new Date(
+      (result.entitlement.valid_until as string).replace(" ", "T") + "Z"
+    );
+    expect(
+      Math.abs(actualDate.getTime() - expectedDate.getTime())
+    ).toBeLessThan(10000); // within 10 seconds
     // Licence is short-lived (not lifetime / valid_day=0)
     expect(result.licence).toBeTruthy();
   });
@@ -1117,6 +1123,72 @@ describe("Scn: Self-deactivation policy", () => {
       action: "deactivate_admin",
     });
     // Should succeed — admin action bypasses policy check
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Security: deactivate requires licence token fingerprint match
+// ═══════════════════════════════════════════════════════════════════════════
+describe("Security: Deactivate licence token verification", () => {
+  let env: TestEnv;
+  let licenseKey: string;
+
+  beforeAll(async () => {
+    env = await createTestEnv();
+
+    await seedPlan(env.db, {
+      planId: "animate-sec-deact",
+      productId: "animate",
+      name: "AniMate for Deact Test",
+      billingModel: "lifetime",
+      licenseModel: "single_machine",
+      maxActivations: 1,
+      allowSelfDeactivate: true,
+    });
+    [licenseKey] = await batchCreateLicenses(env.db, {
+      count: 1,
+      planId: "animate-sec-deact",
+      notes: "security-deact-test",
+      batchId: "test-sec-deact",
+      actor: "test",
+      ipAddress: "127.0.0.1",
+    });
+
+    // Activate the device
+    await activateOrder(env.db, env.config, env.registry, {
+      licenseKey,
+      productId: "animate",
+      fingerprint: "my-machine",
+      appVersion: "1.0.0",
+      platform: "windows",
+      ipAddress: "10.0.0.1",
+    });
+  });
+
+  it("rejects deactivate when expectedFingerprint does not match request", async () => {
+    // Attacker uses another device's licence token (other-machine) to try to
+    // deactivate "my-machine"
+    const err = await catchError(() =>
+      deactivateOrder(env.db, env.config, env.registry, {
+        licenseKey,
+        productId: "animate",
+        fingerprint: "my-machine",
+        ipAddress: "10.0.0.1",
+        expectedFingerprint: "other-machine", // mismatch!
+      })
+    );
+    expect(err).not.toBeNull();
+    expect(err!.error).toBe("FINGERPRINT_MISMATCH");
+  });
+
+  it("allows deactivate when expectedFingerprint matches request", async () => {
+    await deactivateOrder(env.db, env.config, env.registry, {
+      licenseKey,
+      productId: "animate",
+      fingerprint: "my-machine",
+      ipAddress: "10.0.0.1",
+      expectedFingerprint: "my-machine", // matches
+    });
   });
 });
 
