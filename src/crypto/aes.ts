@@ -65,13 +65,18 @@ export function hexToBytes(hex: string): Uint8Array {
   return bytes;
 }
 
+export function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes);
+  return copy.buffer;
+}
+
 let cachedAesKey: CryptoKey | null = null;
 
 async function importAesKey(keyBytes: Uint8Array): Promise<CryptoKey> {
   if (!cachedAesKey) {
     cachedAesKey = await crypto.subtle.importKey(
       "raw",
-      keyBytes,
+      toArrayBuffer(keyBytes),
       { name: "AES-CBC" },
       false,
       ["encrypt", "decrypt"]
@@ -94,9 +99,9 @@ export async function aesEncrypt(
   const plainBytes = new TextEncoder().encode(plaintext);
   // Web Crypto auto-applies PKCS#7 padding — do NOT manually pad
   const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-CBC", iv },
+    { name: "AES-CBC", iv: toArrayBuffer(iv) },
     aesKey,
-    plainBytes
+    toArrayBuffer(plainBytes)
   );
   return bytesToHex(new Uint8Array(ciphertext));
 }
@@ -115,9 +120,9 @@ export async function aesDecrypt(
   const cipherBytes = hexToBytes(ciphertextHex);
   // Web Crypto auto-strips PKCS#7 padding — do NOT manually unpad
   const plainBytes = await crypto.subtle.decrypt(
-    { name: "AES-CBC", iv },
+    { name: "AES-CBC", iv: toArrayBuffer(iv) },
     aesKey,
-    cipherBytes
+    toArrayBuffer(cipherBytes)
   );
   return new TextDecoder().decode(plainBytes);
 }

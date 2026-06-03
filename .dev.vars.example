@@ -4,6 +4,14 @@ ADMIN_PASSWORD=change_me
 SESSION_SECRET=change_me_random_secret_key_32chars
 DEFAULT_APP_VERSION=0.1.0
 CORS_ORIGINS=http://localhost:1420,http://127.0.0.1:1420,https://tauri.localhost,tauri://localhost
+DEFAULT_PRODUCT_ID=animate
+
+# Host routing. Localhost is always treated as local development and can access both API and admin.
+# Production example:
+# API_HOSTNAMES=licence.getanimate.app,api.licence.getanimate.app
+# ADMIN_HOSTNAMES=admin.licence.getanimate.app
+API_HOSTNAMES=
+ADMIN_HOSTNAMES=
 
 # RSA private key in PKCS#8 DER hex format (convert with: npm run convert-key)
 # Copy the PKCS#8 output from the conversion script
@@ -23,4 +31,4 @@ ACTIVATE_RATE_LIMIT_ORDER_FAIL_WINDOW_SECONDS=3600
 # Creem license activation
 CREEM_API_KEY=
 CREEM_TEST_MODE=true
-CREEM_DEFAULT_PRODUCT_ID=animate-companion-lifetime-basic-v1
+CREEM_DEFAULT_PLAN_ID=animate-companion-lifetime-basic-v1

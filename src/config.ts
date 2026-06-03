@@ -10,6 +10,8 @@ export interface AppConfig {
   rsaPrivateKeyPkcs8Hex: string;
   defaultAppVersion: string;
   corsOrigins: string[];
+  apiHostnames: string[];
+  adminHostnames: string[];
   // Rate limit settings
   activateRateLimitIpMax: number;
   activateRateLimitIpWindowSeconds: number;
@@ -20,7 +22,8 @@ export interface AppConfig {
   // Creem
   creemApiKey: string;
   creemTestMode: boolean;
-  creemDefaultProductId: string;
+  creemDefaultPlanId: string;
+  defaultProductId: string;
 }
 
 export function loadConfig(env: Record<string, string | undefined>): AppConfig {
@@ -33,6 +36,14 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     corsOrigins: (env.CORS_ORIGINS || "http://localhost:1420")
       .split(",")
       .map((s) => s.trim())
+      .filter(Boolean),
+    apiHostnames: (env.API_HOSTNAMES || "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+    adminHostnames: (env.ADMIN_HOSTNAMES || "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
       .filter(Boolean),
     activateRateLimitIpMax: parseInt(
       env.ACTIVATE_RATE_LIMIT_IP_MAX || "30",
@@ -60,7 +71,10 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     ),
     creemApiKey: env.CREEM_API_KEY || "",
     creemTestMode: (env.CREEM_TEST_MODE || "false").toLowerCase() === "true",
-    creemDefaultProductId:
-      env.CREEM_DEFAULT_PRODUCT_ID || "animate-companion-lifetime-basic-v1",
+    creemDefaultPlanId:
+      env.CREEM_DEFAULT_PLAN_ID ||
+      env.CREEM_DEFAULT_PRODUCT_ID ||
+      "animate-companion-lifetime-basic-v1",
+    defaultProductId: env.DEFAULT_PRODUCT_ID || "animate",
   };
 }

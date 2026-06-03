@@ -6,7 +6,7 @@
  * The signature covers the ASCII bytes of the ciphertext hex string (NOT raw bytes).
  */
 
-import { hexToBytes, bytesToHex } from "./aes";
+import { hexToBytes, bytesToHex, toArrayBuffer } from "./aes";
 
 let cachedPrivateKey: CryptoKey | null = null;
 let cachedPrivateKeyHex: string | null = null;
@@ -24,7 +24,7 @@ export async function importPrivateKey(
   const der = hexToBytes(pkcs8Hex.trim());
   cachedPrivateKey = await crypto.subtle.importKey(
     "pkcs8",
-    der,
+    toArrayBuffer(der),
     { name: "RSASSA-PKCS1-v1_5", hash: "SHA-1" },
     false,
     ["sign"]
@@ -46,7 +46,7 @@ export async function importPublicKey(spkiHex: string): Promise<CryptoKey> {
   const der = hexToBytes(spkiHex.trim());
   cachedPublicKey = await crypto.subtle.importKey(
     "spki",
-    der,
+    toArrayBuffer(der),
     { name: "RSASSA-PKCS1-v1_5", hash: "SHA-1" },
     false,
     ["verify"]
@@ -69,7 +69,7 @@ export async function signRsa(
   const signature = await crypto.subtle.sign(
     "RSASSA-PKCS1-v1_5",
     key,
-    messageBytes
+    toArrayBuffer(messageBytes)
   );
   return bytesToHex(new Uint8Array(signature));
 }
@@ -88,8 +88,8 @@ export async function verifyRsaSign(
   const valid = await crypto.subtle.verify(
     "RSASSA-PKCS1-v1_5",
     key,
-    signatureBytes,
-    messageBytes
+    toArrayBuffer(signatureBytes),
+    toArrayBuffer(messageBytes)
   );
   if (!valid) {
     throw new Error("rsa verify: signature verification failed");

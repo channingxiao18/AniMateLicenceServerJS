@@ -1,1 +1,1 @@
-ALTER TABLE `orders` ADD COLUMN `external_instance_id` text;
+-- Reserved for the previous pre-production schema. The database can be reset.

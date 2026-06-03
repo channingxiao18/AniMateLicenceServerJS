@@ -10,12 +10,16 @@ database_id = "e2c38144-73ff-4f84-b1b9-4d859db796ec"
 
 [vars]
 CREEM_TEST_MODE = "true"
-CREEM_DEFAULT_PRODUCT_ID = "animate-companion-lifetime-basic-v1"
+CREEM_DEFAULT_PLAN_ID = "animate-companion-lifetime-basic-v1"
+API_HOSTNAMES = "localhost,127.0.0.1"
+ADMIN_HOSTNAMES = "localhost,127.0.0.1"
 
 [env.production.vars]
 ADMIN_USERNAME = "admin"
 CORS_ORIGINS = "http://localhost:1420,http://127.0.0.1:1420,https://tauri.localhost,tauri://localhost"
 DEFAULT_APP_VERSION = "0.1.0"
+API_HOSTNAMES = "licence.getanimate.app,api.licence.getanimate.app"
+ADMIN_HOSTNAMES = "admin.licence.getanimate.app"
 ACTIVATE_RATE_LIMIT_IP_MAX = "30"
 ACTIVATE_RATE_LIMIT_IP_WINDOW_SECONDS = "60"
 ACTIVATE_RATE_LIMIT_IP_FAIL_MAX = "15"
