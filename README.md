@@ -44,7 +44,7 @@ npm run dev
 ### 面向客户端 (v1)
 - `POST /v1/activate` — 激活许可证
 - `POST /v1/deactivate` — 停用许可证
-- `POST /v1/refresh` — 订阅刷新 (暂未实现)
+- `POST /v1/refresh` — 刷新授权令牌
 
 ### 管理后台
 - `GET /admin/` — 仪表板
