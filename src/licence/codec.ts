@@ -2,7 +2,7 @@
  * Licence issue/parse — compatible with Python licence_codec.py and Rust licensing/licence.rs.
  *
  * Licence string format (no separators):
- *   IV(32 hex) + LEN(8 hex) + CIPHERTEXT_HEX(LEN chars) + SIGNATURE_HEX(256 chars)
+ *   IV(32 hex) + LEN(8 hex) + CIPHERTEXT_HEX(LEN chars) + SIGNATURE_HEX(768 chars)
  *
  * Inner plaintext format:
  *   AUTH_LEN(8 hex) + AUTH_JSON + FP_LEN(8 hex) + FINGERPRINT_BLOB

@@ -19,7 +19,7 @@ npm install
 # 运行测试
 npm test
 
-# 转换密钥格式 (PKCS#1 DER → PKCS#8 DER)
+# 转换密钥格式 (RSA-3072 PKCS#1 DER → PKCS#8 DER)
 # 首先确保 keys/private.hex 和 keys/public.hex 存在
 # 可以从 Python 版项目 ../AniMateLicenceServer/keys/ 复制
 npm run convert-key
@@ -75,12 +75,12 @@ npx wrangler secret put RSA_PRIVATE_KEY_PKCS8_HEX
 npm run deploy
 ```
 
-## 与 Python 版的兼容性
+## 授权格式
 
-JS 版本与 Python 版本在许可证编解码层面**逐字节兼容**：
-- 许可证格式: IV(32) + LEN(8) + CIPHERTEXT + SIGNATURE(256)
+JS 版本与 AniMate Rust 客户端在许可证编解码层面**逐字节兼容**：
+- 许可证格式: IV(32) + LEN(8) + CIPHERTEXT + SIGNATURE(768)
 - AES-256-CBC + PKCS#7 填充
-- RSA-1024 PKCS#1 v1.5 SHA-1 签名
+- RSA-3072 PKCS#1 v1.5 SHA-256 签名
 - 签名覆盖 hex 密文字符串的 ASCII 字节
 
-已通过双向交叉兼容验证 (Python 签发 → JS 解密, JS 签发 → Python 解密)。
+发布环境必须配置与客户端内置公钥匹配的 `RSA_PRIVATE_KEY_PKCS8_HEX`。该值是 PKCS#8 DER 的 hex 编码，不是 PKCS#1 私钥。

@@ -183,7 +183,7 @@ export function createTestDb(): { sqlite: Database.Database; db: AppDb } {
 
 export function generateTestKeypair(): { privateKeyPkcs8Hex: string; publicKeySpkiHex: string } {
   const { privateKey, publicKey } = generateKeyPairSync("rsa", {
-    modulusLength: 1024,
+    modulusLength: 3072,
     publicKeyEncoding: { type: "pkcs1", format: "der" },
     privateKeyEncoding: { type: "pkcs1", format: "der" },
   });

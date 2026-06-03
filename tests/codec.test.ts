@@ -18,7 +18,7 @@ import { signRsa, verifyRsaSign } from "../src/crypto/rsa";
 
 function generateTestKeypair() {
   const { privateKey, publicKey } = generateKeyPairSync("rsa", {
-    modulusLength: 1024,
+    modulusLength: 3072,
     publicKeyEncoding: { type: "pkcs1", format: "der" },
     privateKeyEncoding: { type: "pkcs1", format: "der" },
   });
@@ -72,12 +72,12 @@ describe("issueLicence and parse", () => {
     const licence = await issueLicence(fingerprint, auth, keys.privateKeyPkcs8Hex);
 
     // Licence should be a non-empty string
-    expect(licence.length).toBeGreaterThan(40 + 256); // IV + len + some ciphertext + signature
+    expect(licence.length).toBeGreaterThan(40 + 768); // IV + len + some ciphertext + signature
 
     // Parse outer
     const [iv, ct, sig] = parseLicenceOuter(licence);
     expect(iv.length).toBe(32);
-    expect(sig.length).toBe(256);
+    expect(sig.length).toBe(768);
 
     // Verify + decrypt
     await verifyRsaSign(ct, sig, keys.publicKeySpkiHex);
@@ -130,8 +130,8 @@ describe("issueLicence and parse", () => {
     const ct = await aesEncrypt(getAesKey(), iv, inner);
     const sig = await signRsa(ct, keys.privateKeyPkcs8Hex);
 
-    // Expected: IV(32) + LEN(8) + CT(len) + SIG(256)
-    const expectedLen = 32 + 8 + ct.length + 256;
+    // Expected: IV(32) + LEN(8) + CT(len) + SIG(768)
+    const expectedLen = 32 + 8 + ct.length + 768;
     const licence = await issueLicence(fp, auth, keys.privateKeyPkcs8Hex);
     expect(licence.length).toBe(expectedLen);
   });

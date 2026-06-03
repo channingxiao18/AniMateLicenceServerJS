@@ -1,5 +1,5 @@
 /**
- * RSA-1024 PKCS#1 v1.5 SHA-1 signing — compatible with AniMate Rust licensing.
+ * RSA-3072 PKCS#1 v1.5 SHA-256 signing — compatible with AniMate Rust licensing.
  *
  * Uses Web Crypto API (SubtleCrypto).
  * Key format: PKCS#8 DER (private) / SPKI DER (public), hex-encoded.
@@ -25,7 +25,7 @@ export async function importPrivateKey(
   cachedPrivateKey = await crypto.subtle.importKey(
     "pkcs8",
     toArrayBuffer(der),
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-1" },
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
     false,
     ["sign"]
   );
@@ -47,7 +47,7 @@ export async function importPublicKey(spkiHex: string): Promise<CryptoKey> {
   cachedPublicKey = await crypto.subtle.importKey(
     "spki",
     toArrayBuffer(der),
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-1" },
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
     false,
     ["verify"]
   );

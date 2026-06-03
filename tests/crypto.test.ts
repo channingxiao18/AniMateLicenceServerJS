@@ -23,7 +23,7 @@ const nodeCrypto = createRequire(import.meta.url)("node:crypto") as typeof impor
 
 function generateTestKeypair() {
   const { privateKey, publicKey } = nodeCrypto.generateKeyPairSync("rsa", {
-    modulusLength: 1024,
+    modulusLength: 3072,
     publicKeyEncoding: { type: "pkcs1", format: "der" },
     privateKeyEncoding: { type: "pkcs1", format: "der" },
   });
@@ -150,15 +150,15 @@ describe("pack/unpack AES blob", () => {
   });
 });
 
-describe("RSA-1024 sign/verify", () => {
+describe("RSA-3072 sign/verify", () => {
   it("signs and verifies hex message", async () => {
     const keys = generateTestKeypair();
     const message = "abc123deadbeef";
 
     const sigHex = await signRsa(message, keys.privateKeyPkcs8Hex);
     expect(sigHex).toMatch(/^[0-9a-f]+$/);
-    // RSA-1024 signature is 128 bytes = 256 hex chars
-    expect(sigHex.length).toBe(256);
+    // RSA-3072 signature is 384 bytes = 768 hex chars
+    expect(sigHex.length).toBe(768);
 
     // Should verify successfully
     await expect(
