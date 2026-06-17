@@ -17,6 +17,7 @@ import { createRateLimiter } from "../middleware/rate_limit";
 import type { ActivateRateLimiter } from "../services/rate_limit";
 import { getAesKey, aesDecrypt } from "../crypto/aes";
 import { parseLicenceOuter, parseLicenceInner } from "../licence/codec";
+import { recordTelemetryEvent, TelemetryError } from "../services/telemetry";
 
 type ClientBody = {
   product_id?: string;
@@ -45,6 +46,30 @@ function readClientBody(body: ClientBody) {
 
 function statusFor(err: ActivationError): 400 | 403 | 404 | 409 | 429 | 500 | 502 {
   return err.statusCode as 400 | 403 | 404 | 409 | 429 | 500 | 502;
+}
+
+function telemetryStatusFor(err: TelemetryError): 400 | 401 | 413 | 500 {
+  return err.statusCode as 400 | 401 | 413 | 500;
+}
+
+async function readTelemetryBody(c: any): Promise<unknown> {
+  const contentType = c.req.header("content-type") || "";
+  if (!contentType.toLowerCase().includes("application/json")) {
+    throw new TelemetryError("UNSUPPORTED_MEDIA_TYPE", "只接受 JSON 请求", 400);
+  }
+  const contentLength = Number(c.req.header("content-length") || 0);
+  if (contentLength > 8192) {
+    throw new TelemetryError("PAYLOAD_TOO_LARGE", "请求体超过 8KB", 413);
+  }
+  const text = await c.req.text();
+  if (text.length > 8192) {
+    throw new TelemetryError("PAYLOAD_TOO_LARGE", "请求体超过 8KB", 413);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new TelemetryError("INVALID_JSON", "请求体格式无效", 400);
+  }
 }
 
 /**
@@ -129,6 +154,26 @@ export function createV1Router(db: Database, config: AppConfig, registry: Provid
   router.use("/refresh", rateLimiter);
   router.use("/deactivate", rateLimiter);
   router.use("/license/status", rateLimiter);
+
+  router.post("/telemetry", async (c) => {
+    try {
+      const body = await readTelemetryBody(c);
+      return c.json(
+        await recordTelemetryEvent(
+          db,
+          config,
+          c.req.header("x-animate-telemetry-token") || null,
+          body
+        )
+      );
+    } catch (err) {
+      if (err instanceof TelemetryError) {
+        return c.json({ error: err.error, message: err.message }, telemetryStatusFor(err));
+      }
+      console.error("Telemetry error:", err);
+      return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
+    }
+  });
 
   router.post("/activate", async (c) => {
     const limiter = c.get("rateLimiter") as ActivateRateLimiter;

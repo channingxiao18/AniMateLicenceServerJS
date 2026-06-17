@@ -19,6 +19,7 @@ import {
   listSubscriptions,
   listWebhookEvents,
 } from "../services/activation";
+import { getTelemetryReport, listTelemetryEvents } from "../services/telemetry";
 import {
   createSession,
   destroySession,
@@ -73,6 +74,8 @@ const navItems = [
   ["/admin/entitlements", "授权权益"],
   ["/admin/subscriptions", "订阅"],
   ["/admin/providers", "支付映射"],
+  ["/admin/telemetry/reports", "统计报表"],
+  ["/admin/telemetry/events", "统计事件"],
   ["/admin/logs", "日志"],
 ];
 
@@ -126,6 +129,30 @@ function flash(c: any): string {
 
 function modal(id: string, title: string, action: string, fields: string, submitLabel: string): string {
   return `<div id="${e(id)}" class="modal"><a class="modal-bg" href="#"></a><div class="modal-card"><div class="modal-head"><h2>${e(title)}</h2></div><div class="modal-body"><form class="modal-form" method="post" action="${e(action)}">${fields}<div class="modal-actions"><a class="btn" href="#">取消</a><button class="primary">${e(submitLabel)}</button></div></form></div></div></div>`;
+}
+
+function formatHours(seconds: number): string {
+  if (!seconds) return "0h";
+  const hours = seconds / 3600;
+  return `${hours >= 10 ? hours.toFixed(0) : hours.toFixed(1)}h`;
+}
+
+function shortId(value: string | null): string {
+  if (!value) return "-";
+  if (value.length <= 12) return value;
+  return `${value.slice(0, 6)}...${value.slice(-6)}`;
+}
+
+function payloadSummary(payloadJson: string): string {
+  try {
+    const payload = JSON.parse(payloadJson) as Record<string, unknown>;
+    return Object.entries(payload)
+      .slice(0, 4)
+      .map(([key, value]) => `${key}=${String(value)}`)
+      .join(", ") || "{}";
+  } catch {
+    return payloadJson.slice(0, 80);
+  }
 }
 
 export async function renderAdminDashboard(db: Database, successMessage = ""): Promise<string> {
@@ -237,7 +264,7 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     const plans = await listPlans(db);
     const planOptions = plans.map((p) => `<option value="${e(p.planId)}">${e(p.name)} (${e(p.planId)})</option>`).join("");
     const rows = result.items
-      .map((l) => `<tr><td><a href="/admin/licenses/${encodeURIComponent(l.licenseKey)}"><code>${e(l.licenseKey)}</code></a></td><td>${badge(l.status)}</td><td>${e(l.product?.name || "-")}</td><td>${e(l.plan?.name || "-")}</td><td>${badge(l.entitlement?.status || "-")}</td><td>${e(l.channel)}</td><td>${e(l.createdAt)}</td></tr>`)
+      .map((l) => `<tr><td><a href="/admin/licenses/${encodeURIComponent(l.licenseKey)}"><code>${e(l.licenseKey)}</code></a></td><td>${badge(l.status)}</td><td>${e(l.product?.name || "-")}</td><td>${e(l.plan?.name || "-")}</td><td>${badge(l.entitlement?.status || "-")}</td><td>${e(l.entitlement?.customerEmail || "-")}</td><td>${e(l.batchId || "-")}</td><td>${e(l.notes || "-")}</td><td>${e(l.channel)}</td><td>${e(l.createdAt)}</td></tr>`)
       .join("");
     const createLicenseModal = modal(
       "create-license",
@@ -246,7 +273,7 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
       `<div><label>套餐</label><select name="plan_id">${planOptions}</select></div><div><label>数量</label><input name="count" type="number" value="10" min="1" max="1000"></div><div><label>客户邮箱</label><input name="customer_email"></div><div><label>批次</label><input name="batch_id"></div><div><label>备注</label><input name="notes"></div>`,
       "生成"
     );
-    return c.html(shell("兑换码", "/admin/licenses", `${flash(c)}<div class="toolbar"><form method="get" class="actions"><input name="search" value="${e(search)}" placeholder="搜索兑换码/邮箱" style="width:220px"><button>搜索</button></form><a class="btn primary" href="#create-license">生成兑换码</a><a class="btn" href="#batch-ops">批量操作</a></div><table><thead><tr><th>兑换码</th><th>状态</th><th>产品</th><th>套餐</th><th>权益</th><th>来源</th><th>创建时间</th></tr></thead><tbody>${rows || `<tr><td colspan="7" class="muted">暂无兑换码</td></tr>`}</tbody></table>${createLicenseModal}${modal("batch-ops","批量操作","/admin/api/licenses/batch/suspend",`<div><label>兑换码列表 (每行一个或逗号分隔)</label><textarea name="license_keys" rows="6" placeholder="AM-XXXXXXXXXXXX&#10;AM-YYYYYYYYYYYY" required></textarea></div><div><label>操作类型</label><div class="actions" style="margin-top:6px"><button formaction="/admin/api/licenses/batch/suspend">批量暂停</button><button formaction="/admin/api/licenses/batch/revoke" class="danger">批量作废</button><button formaction="/admin/api/licenses/batch/reactivate">批量恢复</button></div></div>`,"执行")}`));
+    return c.html(shell("兑换码", "/admin/licenses", `${flash(c)}<div class="toolbar"><form method="get" class="actions"><input name="search" value="${e(search)}" placeholder="搜索兑换码/邮箱" style="width:220px"><button>搜索</button></form><a class="btn primary" href="#create-license">生成兑换码</a><a class="btn" href="#batch-ops">批量操作</a></div><table><thead><tr><th>兑换码</th><th>状态</th><th>产品</th><th>套餐</th><th>权益</th><th>客户邮箱</th><th>批次</th><th>备注</th><th>来源</th><th>创建时间</th></tr></thead><tbody>${rows || `<tr><td colspan="10" class="muted">暂无兑换码</td></tr>`}</tbody></table>${createLicenseModal}${modal("batch-ops","批量操作","/admin/api/licenses/batch/suspend",`<div><label>兑换码列表 (每行一个或逗号分隔)</label><textarea name="license_keys" rows="6" placeholder="AM-XXXXXXXXXXXX&#10;AM-YYYYYYYYYYYY" required></textarea></div><div><label>操作类型</label><div class="actions" style="margin-top:6px"><button formaction="/admin/api/licenses/batch/suspend">批量暂停</button><button formaction="/admin/api/licenses/batch/revoke" class="danger">批量作废</button><button formaction="/admin/api/licenses/batch/reactivate">批量恢复</button></div></div>`,"执行")}`));
   });
 
   router.get("/providers", async (c) => {
@@ -369,6 +396,53 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
       <h3>设备 (${devices.filter((d) => d.status === "active").length} 活跃)</h3>
       <table><thead><tr><th>机器 ID</th><th>状态</th><th>平台</th><th>激活时间</th><th>最后在线</th></tr></thead><tbody>${deviceRows || `<tr><td colspan="5" class="muted">暂无设备</td></tr>`}</tbody></table>
     `));
+  });
+
+  router.get("/telemetry/reports", async (c) => {
+    const days = Number(c.req.query("days") || 14);
+    const productId = c.req.query("product_id") || "animate";
+    const report = await getTelemetryReport(db, { days, productId });
+    const cards = [
+      ["下载", report.totals.downloads],
+      ["首次安装", report.totals.installs],
+      ["活跃机器", report.totals.activeMachines],
+      ["启动次数", report.totals.launches],
+      ["运行时长", formatHours(report.totals.activeSecs)],
+      ["Overlay 时长", formatHours(report.totals.overlayVisibleSecs)],
+    ]
+      .map(([label, value]) => `<div class="card stat"><div class="num">${e(value)}</div><div class="muted">${e(label)}</div></div>`)
+      .join("");
+    const dailyRows = report.daily
+      .map((r) => `<tr><td>${e(r.day)}</td><td>${r.downloads}</td><td>${r.installs}</td><td>${r.activeMachines}</td><td>${r.launches}</td><td>${formatHours(r.activeSecs)}</td><td>${formatHours(r.overlayVisibleSecs)}</td><td>${r.events}</td></tr>`)
+      .join("");
+    const versionRows = report.versions
+      .map((r) => `<tr><td>${e(r.appVersion)}</td><td>${r.activeMachines}</td><td>${r.launches}</td><td>${formatHours(r.activeSecs)}</td></tr>`)
+      .join("");
+    const stateRows = report.licenseStates
+      .map((r) => `<tr><td>${badge(r.licenseState)}</td><td>${r.activeMachines}</td><td>${r.launches}</td></tr>`)
+      .join("");
+    const platformRows = report.platforms
+      .map((r) => `<tr><td>${e(r.platform)}</td><td>${r.activeMachines}</td><td>${r.installs}</td><td>${r.downloads}</td></tr>`)
+      .join("");
+    return c.html(shell("统计报表", "/admin/telemetry/reports", `<div class="toolbar"><form method="get" class="actions"><label style="width:130px">产品<input name="product_id" value="${e(productId)}"></label><label style="width:120px">天数<input name="days" type="number" value="${days}" min="1" max="90"></label><button>刷新</button></form><a class="btn" href="/admin/telemetry/events">查看事件</a></div><div class="grid stats">${cards}</div><h3>每日趋势</h3><table><thead><tr><th>日期</th><th>下载</th><th>安装</th><th>活跃机器</th><th>启动</th><th>运行时长</th><th>Overlay 时长</th><th>事件</th></tr></thead><tbody>${dailyRows || `<tr><td colspan="8" class="muted">暂无数据</td></tr>`}</tbody></table><div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-top:14px"><div><h3>版本分布</h3><table><thead><tr><th>版本</th><th>活跃机器</th><th>启动</th><th>运行时长</th></tr></thead><tbody>${versionRows || `<tr><td colspan="4" class="muted">暂无数据</td></tr>`}</tbody></table></div><div><h3>授权状态</h3><table><thead><tr><th>状态</th><th>活跃机器</th><th>启动</th></tr></thead><tbody>${stateRows || `<tr><td colspan="3" class="muted">暂无数据</td></tr>`}</tbody></table></div><div><h3>平台分布</h3><table><thead><tr><th>平台</th><th>活跃机器</th><th>安装</th><th>下载</th></tr></thead><tbody>${platformRows || `<tr><td colspan="4" class="muted">暂无数据</td></tr>`}</tbody></table></div></div>`));
+  });
+
+  router.get("/telemetry/events", async (c) => {
+    const page = Number(c.req.query("page") || 1);
+    const params = {
+      page,
+      pageSize: 80,
+      event: c.req.query("event") || undefined,
+      productId: c.req.query("product_id") || undefined,
+      machineHash: c.req.query("machine_hash") || undefined,
+      installId: c.req.query("install_id") || undefined,
+      sessionId: c.req.query("session_id") || undefined,
+    };
+    const result = await listTelemetryEvents(db, params);
+    const rows = result.items
+      .map((x) => `<tr><td>${e(x.receivedAt)}</td><td>${e(x.event)}</td><td>${e(x.productId)}</td><td>${e(x.appVersion || "-")}</td><td>${e(x.platform || "-")}</td><td>${e(x.sourceId)}</td><td>${badge(x.licenseState || "unknown")}</td><td><code>${e(shortId(x.machineHash))}</code></td><td><code>${e(shortId(x.installId))}</code></td><td><code>${e(shortId(x.sessionId))}</code></td><td>${e(payloadSummary(x.payloadJson))}</td></tr>`)
+      .join("");
+    return c.html(shell("统计事件", "/admin/telemetry/events", `<div class="toolbar"><form method="get" class="actions"><input name="event" value="${e(params.event || "")}" placeholder="event" style="width:150px"><input name="product_id" value="${e(params.productId || "")}" placeholder="product_id" style="width:130px"><input name="machine_hash" value="${e(params.machineHash || "")}" placeholder="machine hash" style="width:180px"><input name="install_id" value="${e(params.installId || "")}" placeholder="install_id" style="width:180px"><input name="session_id" value="${e(params.sessionId || "")}" placeholder="session_id" style="width:180px"><button>筛选</button></form><a class="btn" href="/admin/telemetry/reports">查看报表</a></div><table><thead><tr><th>接收时间</th><th>事件</th><th>产品</th><th>版本</th><th>平台</th><th>来源</th><th>授权</th><th>机器</th><th>安装</th><th>会话</th><th>Payload</th></tr></thead><tbody>${rows || `<tr><td colspan="11" class="muted">暂无事件</td></tr>`}</tbody></table><div class="muted" style="margin-top:10px">共 ${result.total} 条，当前第 ${page} 页</div>`));
   });
 
   router.get("/logs", async (c) => {

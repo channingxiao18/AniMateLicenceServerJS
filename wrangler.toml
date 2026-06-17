@@ -25,6 +25,7 @@ ACTIVATE_RATE_LIMIT_IP_FAIL_MAX = "15"
 ACTIVATE_RATE_LIMIT_IP_FAIL_WINDOW_SECONDS = "300"
 ACTIVATE_RATE_LIMIT_ORDER_FAIL_MAX = "8"
 ACTIVATE_RATE_LIMIT_ORDER_FAIL_WINDOW_SECONDS = "3600"
+TELEMETRY_TOKENS = "animate-desktop-prod-v1-0991ed7c066d949eb026d8c5e40f3230:desktop_prod,animate-desktop-dev:desktop_dev"
 
 # Secrets (already set, set via: wrangler secret put <NAME>)
 #   ADMIN_PASSWORD

@@ -3,7 +3,7 @@
  */
 
 import { sql } from "drizzle-orm";
-import { integer, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import { sqliteTable } from "drizzle-orm/sqlite-core";
 
 // Products are client-facing app boundaries, for example AniMate.
@@ -200,3 +200,125 @@ export const activationLogs = sqliteTable("activation_logs", {
   detail: text("detail"),
   createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
 });
+
+export const telemetryEvents = sqliteTable(
+  "telemetry_events",
+  {
+    eventId: text("event_id").primaryKey(),
+    schemaVersion: integer("schema_version").notNull(),
+    event: text("event").notNull(),
+    sourceId: text("source_id").notNull(),
+    receivedAt: text("received_at").notNull().default(sql`(datetime('now'))`),
+    receivedAtUnix: integer("received_at_unix").notNull(),
+    sentAt: integer("sent_at"),
+    productId: text("product_id").notNull(),
+    appVersion: text("app_version"),
+    platform: text("platform"),
+    channel: text("channel"),
+    machineHash: text("machine_hash"),
+    installId: text("install_id"),
+    sessionId: text("session_id"),
+    licenseState: text("license_state"),
+    activationId: text("activation_id"),
+    payloadJson: text("payload_json").notNull(),
+    rawJson: text("raw_json").notNull(),
+  },
+  (table) => ({
+    receivedIdx: index("telemetry_events_received_idx").on(table.receivedAt),
+    productEventIdx: index("telemetry_events_product_event_idx").on(
+      table.productId,
+      table.event,
+      table.receivedAt
+    ),
+    machineIdx: index("telemetry_events_machine_idx").on(table.machineHash, table.receivedAt),
+    installIdx: index("telemetry_events_install_idx").on(table.installId, table.receivedAt),
+    sessionIdx: index("telemetry_events_session_idx").on(table.sessionId, table.receivedAt),
+  })
+);
+
+export const telemetrySessionState = sqliteTable(
+  "telemetry_session_state",
+  {
+    sessionId: text("session_id").primaryKey(),
+    productId: text("product_id").notNull(),
+    machineHash: text("machine_hash"),
+    installId: text("install_id"),
+    appVersion: text("app_version"),
+    platform: text("platform"),
+    channel: text("channel"),
+    licenseState: text("license_state"),
+    sourceId: text("source_id").notNull(),
+    startedAt: integer("started_at"),
+    lastEventAt: integer("last_event_at").notNull(),
+    lastProcessDurationSecs: integer("last_process_duration_secs").notNull().default(0),
+    lastOverlayVisibleSecs: integer("last_overlay_visible_secs").notNull().default(0),
+    updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => ({
+    machineIdx: index("telemetry_session_state_machine_idx").on(table.machineHash, table.updatedAt),
+  })
+);
+
+export const telemetryDailyMetrics = sqliteTable(
+  "telemetry_daily_metrics",
+  {
+    day: text("day").notNull(),
+    productId: text("product_id").notNull(),
+    sourceId: text("source_id").notNull(),
+    platform: text("platform").notNull().default("unknown"),
+    channel: text("channel").notNull().default("official"),
+    appVersion: text("app_version").notNull().default("unknown"),
+    licenseState: text("license_state").notNull().default("unknown"),
+    downloads: integer("downloads").notNull().default(0),
+    installs: integer("installs").notNull().default(0),
+    launches: integer("launches").notNull().default(0),
+    activeSecs: integer("active_secs").notNull().default(0),
+    overlayVisibleSecs: integer("overlay_visible_secs").notNull().default(0),
+    events: integer("events").notNull().default(0),
+    updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => ({
+    pk: primaryKey({
+      columns: [
+        table.day,
+        table.productId,
+        table.sourceId,
+        table.platform,
+        table.channel,
+        table.appVersion,
+        table.licenseState,
+      ],
+    }),
+  })
+);
+
+export const telemetryDailyUniques = sqliteTable(
+  "telemetry_daily_uniques",
+  {
+    day: text("day").notNull(),
+    productId: text("product_id").notNull(),
+    uniqueType: text("unique_type").notNull(),
+    uniqueValue: text("unique_value").notNull(),
+    sourceId: text("source_id").notNull(),
+    platform: text("platform").notNull().default("unknown"),
+    channel: text("channel").notNull().default("official"),
+    appVersion: text("app_version").notNull().default("unknown"),
+    licenseState: text("license_state").notNull().default("unknown"),
+    firstSeenAt: text("first_seen_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => ({
+    pk: primaryKey({
+      columns: [table.day, table.productId, table.uniqueType, table.uniqueValue],
+    }),
+    reportIdx: index("telemetry_daily_uniques_report_idx").on(
+      table.day,
+      table.productId,
+      table.uniqueType,
+      table.sourceId,
+      table.platform,
+      table.channel,
+      table.appVersion,
+      table.licenseState
+    ),
+  })
+);

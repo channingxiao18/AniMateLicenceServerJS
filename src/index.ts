@@ -32,6 +32,7 @@ export interface Env {
   ACTIVATE_RATE_LIMIT_IP_FAIL_WINDOW_SECONDS?: string;
   ACTIVATE_RATE_LIMIT_ORDER_FAIL_MAX?: string;
   ACTIVATE_RATE_LIMIT_ORDER_FAIL_WINDOW_SECONDS?: string;
+  TELEMETRY_TOKENS?: string;
   CREEM_API_KEY?: string;
   CREEM_TEST_MODE?: string;
   CREEM_DEFAULT_PRODUCT_ID?: string;
@@ -109,7 +110,7 @@ let appPromise: Promise<Hono> | null = null;
 const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-AniMate-Telemetry-Token",
   "Access-Control-Max-Age": "86400",
 };
 

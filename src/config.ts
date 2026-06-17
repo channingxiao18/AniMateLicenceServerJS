@@ -24,6 +24,7 @@ export interface AppConfig {
   creemTestMode: boolean;
   creemDefaultPlanId: string;
   defaultProductId: string;
+  telemetryTokens: string;
 }
 
 export function loadConfig(env: Record<string, string | undefined>): AppConfig {
@@ -76,5 +77,8 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
       env.CREEM_DEFAULT_PRODUCT_ID ||
       "animate-companion-lifetime-basic-v1",
     defaultProductId: env.DEFAULT_PRODUCT_ID || "animate",
+    telemetryTokens:
+      env.TELEMETRY_TOKENS ||
+      "animate-desktop-prod-v1:desktop_prod,animate-desktop-dev:desktop_dev",
   };
 }
