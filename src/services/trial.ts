@@ -460,3 +460,12 @@ export async function listTrialGrants(
   const total = filtered.length;
   return { items: filtered.slice((page - 1) * pageSize, page * pageSize), total };
 }
+
+export async function deleteTrialGrant(db: Database, trialId: string): Promise<void> {
+  const grant = await db.select().from(trialGrants).where(eq(trialGrants.id, trialId)).get();
+  if (!grant) {
+    throw new ActivationError("TRIAL_NOT_FOUND", "试用记录不存在", 404);
+  }
+
+  await db.delete(trialGrants).where(eq(trialGrants.id, trialId));
+}

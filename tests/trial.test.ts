@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createTestEnv, seedPlan, seedProduct } from "./helpers/setup";
 import { decryptLicencePayload } from "../src/licence/codec";
 import { trialGrants } from "../src/db/schema";
+import { createAdminApiRouter } from "../src/routes/admin_api";
 import { ActivationError } from "../src/services/activation";
 import { listTrialGrants, startTrial } from "../src/services/trial";
 import { aesEncrypt, getAesKey, packAesBlob } from "../src/crypto/aes";
@@ -300,6 +301,29 @@ describe("trial licence grants", () => {
       "import_dance",
       "import_stage",
     ]);
+  });
+
+  it("deletes trial grants through the admin API for testing", async () => {
+    const env = await createTestEnv();
+
+    const result = await startTrial(env.db, env.config, {
+      productId: "animate",
+      fingerprint: "trial-machine-delete",
+      appVersion: "1.2.0",
+      platform: "windows",
+      ipAddress: "127.0.0.1",
+    });
+
+    const router = createAdminApiRouter(env.db, env.config, env.registry);
+    const response = await router.request(
+      `/trials/${encodeURIComponent(result.trial.trial_id)}/delete`,
+      { method: "POST" }
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "ok" });
+    const grants = await listTrialGrants(env.db, { page: 1, pageSize: 20 });
+    expect(grants.total).toBe(0);
   });
 
   it("rejects mismatched products", async () => {

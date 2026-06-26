@@ -27,6 +27,7 @@ import {
   updatePlan,
   updateProduct,
 } from "../services/activation";
+import { deleteTrialGrant } from "../services/trial";
 
 import type { ProviderRegistry } from "../services/provider";
 
@@ -387,6 +388,15 @@ export function createAdminApiRouter(db: Database, _config: AppConfig, registry:
   router.post("/activations/:id/unbind", async (c) => {
     try {
       await adminUnbindDevice(db, Number(c.req.param("id")), ip(c));
+      return okOrRedirect(c, { status: "ok" });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  router.post("/trials/:id/delete", async (c) => {
+    try {
+      await deleteTrialGrant(db, c.req.param("id"));
       return okOrRedirect(c, { status: "ok" });
     } catch (err) {
       return errorResponse(c, err);

@@ -316,10 +316,10 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     const result = await listTrialGrants(db, { page, pageSize: 80 });
     const rows = result.items
       .map((t) => {
-        return `<tr><td><code>${e(t.id)}</code></td><td>${badge(t.status)}</td><td>${e(t.product?.name || "-")}</td><td>${e(t.plan?.name || "-")}</td><td><code>${e(prettyJson(t.plan?.featuresJson || "[]"))}</code></td><td>${e(t.feature)}</td><td>${e(t.durationSeconds)}</td><td>${e(t.startedAt)}</td><td>${e(t.validUntil)}</td><td><code>${e(shortId(t.fingerprintHash))}</code></td></tr>`;
+        return `<tr><td><code>${e(t.id)}</code></td><td>${badge(t.status)}</td><td>${e(t.product?.name || "-")}</td><td>${e(t.plan?.name || "-")}</td><td><code>${e(prettyJson(t.plan?.featuresJson || "[]"))}</code></td><td>${e(t.feature)}</td><td>${e(t.durationSeconds)}</td><td>${e(t.startedAt)}</td><td>${e(t.validUntil)}</td><td><code>${e(shortId(t.fingerprintHash))}</code></td><td class="actions"><form method="post" action="/admin/api/trials/${encodeURIComponent(t.id)}/delete" onsubmit="return confirm('确定删除这条试用记录？')"><button class="danger">删除</button></form></td></tr>`;
       })
       .join("");
-    return c.html(shell("试用", "/admin/trials", `<div class="toolbar"><div class="muted">查看试用记录、对应产品和套餐。试用最终发放的功能列表沿用套餐正式授权的功能列表。</div></div><table><thead><tr><th>Trial ID</th><th>状态</th><th>产品</th><th>套餐</th><th>正式功能列表</th><th>试用入口</th><th>时长(秒)</th><th>开始</th><th>到期</th><th>指纹哈希</th></tr></thead><tbody>${rows || `<tr><td colspan="10" class="muted">暂无试用记录</td></tr>`}</tbody></table><div class="muted" style="margin-top:10px">共 ${result.total} 条，当前第 ${page} 页</div>`));
+    return c.html(shell("试用", "/admin/trials", `<div class="toolbar"><div class="muted">查看试用记录、对应产品和套餐。试用最终发放的功能列表沿用套餐正式授权的功能列表。</div></div><table><thead><tr><th>Trial ID</th><th>状态</th><th>产品</th><th>套餐</th><th>正式功能列表</th><th>试用入口</th><th>时长(秒)</th><th>开始</th><th>到期</th><th>指纹哈希</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="11" class="muted">暂无试用记录</td></tr>`}</tbody></table><div class="muted" style="margin-top:10px">共 ${result.total} 条，当前第 ${page} 页</div>`));
   });
 
   router.get("/providers", async (c) => {
