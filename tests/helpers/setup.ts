@@ -188,6 +188,7 @@ CREATE TABLE IF NOT EXISTS trial_grants (
   updated_at text DEFAULT (datetime('now')) NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS trial_grants_product_feature_fingerprint_unique ON trial_grants (product_id, feature, fingerprint_hash);
+CREATE INDEX IF NOT EXISTS trial_grants_product_fingerprint_idx ON trial_grants (product_id, fingerprint_hash);
 
 CREATE TABLE IF NOT EXISTS telemetry_events (
   event_id text PRIMARY KEY NOT NULL,
@@ -321,7 +322,8 @@ export function createTestConfig(rsaPrivateKeyPkcs8Hex: string): AppConfig {
     defaultProductId: "animate",
     telemetryTokens: "animate-desktop-prod-v1:desktop_prod,animate-desktop-dev:desktop_dev",
     trialEnabled: true,
-    trialImportVrmDurationSeconds: 86400,
+    trialFullFeatureDurationSeconds: 86400,
+    trialTimeCheckToken: "animate-trial-time-check-v1",
     trialFingerprintSalt: "test_trial_salt",
   };
 }
@@ -473,7 +475,7 @@ export async function createTestEnv(): Promise<TestEnv> {
   await seedPlan(db, {
     planId: "animate-import-vrm-trial-24h-v1",
     productId: "animate",
-    name: "AniMate Import VRM Trial 24h",
+    name: "AniMate Full Feature Trial 24h",
     edition: "companion",
     tier: "trial",
     billingModel: "trial",
@@ -481,7 +483,7 @@ export async function createTestEnv(): Promise<TestEnv> {
     maxActivations: 1,
     maxAppMajor: 1,
     durationDays: 1,
-    featuresJson: JSON.stringify(["import_vrm"]),
+    featuresJson: JSON.stringify(["import_vrm", "import_dance", "import_stage"]),
     metadataJson: JSON.stringify({
       trial_feature: "import_vrm",
       duration_seconds: 86400,

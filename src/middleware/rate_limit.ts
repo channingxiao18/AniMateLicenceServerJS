@@ -5,7 +5,15 @@
 import type { Context, Next } from "hono";
 import { ActivateRateLimiter, type ActivateRateLimiterConfig } from "../services/rate_limit";
 
-export function createRateLimiter(config: ActivateRateLimiterConfig) {
+type RateLimitOptions = {
+  errorCode?: string;
+  message?: string;
+};
+
+export function createRateLimiter(
+  config: ActivateRateLimiterConfig,
+  options: RateLimitOptions = {}
+) {
   const limiter = new ActivateRateLimiter(config);
 
   return async (c: Context, next: Next) => {
@@ -16,7 +24,10 @@ export function createRateLimiter(config: ActivateRateLimiterConfig) {
 
     if (!limiter.checkRequest(ip)) {
       return c.json(
-        { error: "RATE_LIMITED", message: "请求过于频繁，请稍后再试" },
+        {
+          error: options.errorCode || "RATE_LIMITED",
+          message: options.message || "请求过于频繁，请稍后再试",
+        },
         429
       );
     }

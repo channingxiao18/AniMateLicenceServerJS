@@ -2,7 +2,7 @@
  * One-time trial licence grants.
  */
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/index";
 import { activationLogs, plans, products, trialGrants } from "../db/schema";
@@ -10,7 +10,8 @@ import { createAuthInfo } from "../licence/auth_info";
 import { issueLicence } from "../licence/codec";
 import { ActivationError, nowISO } from "./activation";
 
-const ALLOWED_TRIAL_FEATURE = "import_vrm";
+const DEFAULT_TRIAL_GRANT_FEATURE = "trial";
+const LEGACY_TRIAL_GRANT_FEATURE = "import_vrm";
 
 type TrialGrant = typeof trialGrants.$inferSelect;
 type Product = typeof products.$inferSelect;
@@ -70,6 +71,14 @@ async function sha256Hex(input: string): Promise<string> {
 }
 
 async function fingerprintHash(
+  config: AppConfig,
+  productId: string,
+  fingerprint: string
+): Promise<string> {
+  return sha256Hex(`${config.trialFingerprintSalt}:${productId}:${fingerprint}`);
+}
+
+async function legacyFingerprintHash(
   config: AppConfig,
   productId: string,
   feature: string,
@@ -150,6 +159,10 @@ function planTrialFeature(plan: Plan): string | null {
   return typeof feature === "string" && feature.trim() ? feature.trim() : null;
 }
 
+function planGrantFeature(plan: Plan): string {
+  return planTrialFeature(plan) || DEFAULT_TRIAL_GRANT_FEATURE;
+}
+
 function planDurationSeconds(plan: Plan, fallbackSeconds: number): number {
   const metadata = parseJsonObject(plan.metadataJson);
   const metadataSeconds = Number(metadata.duration_seconds);
@@ -164,8 +177,7 @@ function planDurationSeconds(plan: Plan, fallbackSeconds: number): number {
 
 async function loadTrialPlan(
   db: Database,
-  productId: string,
-  feature: string
+  productId: string
 ): Promise<Plan> {
   const candidates = await db
     .select()
@@ -179,21 +191,17 @@ async function loadTrialPlan(
     )
     .all();
 
-  const matching = candidates.find((plan) => {
-    const features = planFeatures(plan);
-    const metadataFeature = planTrialFeature(plan);
-    return features.includes(feature) && (!metadataFeature || metadataFeature === feature);
-  });
-
-  if (!matching) {
+  if (candidates.length !== 1) {
     throw new ActivationError(
-      "TRIAL_PLAN_NOT_FOUND",
-      "当前产品未配置可用的试用套餐",
-      404
+      "TRIAL_UNAVAILABLE",
+      candidates.length === 0
+        ? "当前产品未配置可用的试用套餐"
+        : "当前产品配置了多个可用试用套餐",
+      200
     );
   }
 
-  return matching;
+  return candidates[0];
 }
 
 async function issueTrialLicence(
@@ -258,19 +266,17 @@ export async function startTrial(
   params: {
     productId?: string | null;
     fingerprint: string;
-    feature: string;
     appVersion: string | null;
     platform: string | null;
     ipAddress: string;
   }
 ): Promise<TrialResponse> {
   if (!config.trialEnabled) {
-    throw new ActivationError("TRIAL_DISABLED", "试用暂未开放", 403);
+    throw new ActivationError("TRIAL_UNAVAILABLE", "试用暂不可用", 200);
   }
 
   const productId = (params.productId || config.defaultProductId).trim();
   const fingerprint = params.fingerprint.trim();
-  const feature = params.feature.trim();
 
   if (!productId) {
     throw new ActivationError("INVALID_REQUEST", "product_id 不能为空", 400);
@@ -278,37 +284,38 @@ export async function startTrial(
   if (!fingerprint) {
     throw new ActivationError("INVALID_REQUEST", "fingerprint 不能为空", 400);
   }
-  if (feature !== ALLOWED_TRIAL_FEATURE) {
-    throw new ActivationError(
-      "TRIAL_FEATURE_NOT_ALLOWED",
-      "当前仅支持 import_vrm 试用",
-      400
-    );
-  }
 
   await loadProduct(db, productId);
-  const trialPlan = await loadTrialPlan(db, productId, feature);
+  const trialPlan = await loadTrialPlan(db, productId);
+  const grantFeature = planGrantFeature(trialPlan);
 
   const durationSeconds = Math.max(
     60,
-    planDurationSeconds(trialPlan, config.trialImportVrmDurationSeconds || 86400)
+    planDurationSeconds(trialPlan, config.trialFullFeatureDurationSeconds || 86400)
   );
-  const fpHash = await fingerprintHash(config, productId, feature, fingerprint);
+  const fpHash = await fingerprintHash(config, productId, fingerprint);
+  const legacyFpHashes = new Set([
+    await legacyFingerprintHash(config, productId, grantFeature, fingerprint),
+    await legacyFingerprintHash(config, productId, LEGACY_TRIAL_GRANT_FEATURE, fingerprint),
+  ]);
   const now = new Date();
 
-  let grant = await db
+  const grants = await db
     .select()
     .from(trialGrants)
     .where(
       and(
         eq(trialGrants.productId, productId),
-        eq(trialGrants.feature, feature),
-        eq(trialGrants.fingerprintHash, fpHash)
+        inArray(trialGrants.fingerprintHash, [fpHash, ...legacyFpHashes])
       )
     )
-    .get();
+    .all();
+  let grant = grants.find((row) =>
+    row.fingerprintHash === fpHash || legacyFpHashes.has(row.fingerprintHash)
+  );
 
   if (grant) {
+    const matchedHash = grant.fingerprintHash;
     if (isExpired(grant, now)) {
       if (grant.status !== "expired") {
         await db
@@ -318,14 +325,14 @@ export async function startTrial(
       }
       await writeTrialLog(db, {
         trialId: grant.id,
-        fingerprintHash: fpHash,
+        fingerprintHash: matchedHash,
         action: "trial_already_used",
         ipAddress: params.ipAddress,
         responseCode: 409,
         detail: {
           product_id: productId,
           plan_id: grant.planId || trialPlan.planId,
-          feature,
+          feature: grant.feature,
           started_at: wireTimestamp(grant.startedAt),
           valid_until: wireTimestamp(grant.validUntil),
         },
@@ -348,14 +355,14 @@ export async function startTrial(
     await updateLicenceTokenHash(db, grant.id, licence);
     await writeTrialLog(db, {
       trialId: grant.id,
-      fingerprintHash: fpHash,
+      fingerprintHash: matchedHash,
       action: "trial_active",
       ipAddress: params.ipAddress,
       responseCode: 200,
       detail: {
         product_id: productId,
         plan_id: grant.planId || trialPlan.planId,
-        feature,
+        feature: grant.feature,
         app_version: params.appVersion,
         platform: params.platform,
       },
@@ -371,7 +378,7 @@ export async function startTrial(
     id: trialId,
     productId,
     planId: trialPlan.planId,
-    feature,
+    feature: grantFeature,
     fingerprintHash: fpHash,
     startedAt,
     validUntil,
@@ -398,7 +405,7 @@ export async function startTrial(
     detail: {
       product_id: productId,
       plan_id: trialPlan.planId,
-      feature,
+      feature: grantFeature,
       app_version: params.appVersion,
       platform: params.platform,
     },

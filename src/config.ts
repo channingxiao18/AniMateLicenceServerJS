@@ -26,7 +26,8 @@ export interface AppConfig {
   defaultProductId: string;
   telemetryTokens: string;
   trialEnabled: boolean;
-  trialImportVrmDurationSeconds: number;
+  trialFullFeatureDurationSeconds: number;
+  trialTimeCheckToken: string;
   trialFingerprintSalt: string;
 }
 
@@ -84,10 +85,12 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
       env.TELEMETRY_TOKENS ||
       "animate-desktop-prod-v1:desktop_prod,animate-desktop-dev:desktop_dev",
     trialEnabled: (env.TRIAL_ENABLED || "true").toLowerCase() !== "false",
-    trialImportVrmDurationSeconds: parseInt(
-      env.TRIAL_IMPORT_VRM_DURATION_SECONDS || "86400",
+    trialFullFeatureDurationSeconds: parseInt(
+      env.TRIAL_FULL_FEATURE_DURATION_SECONDS || "86400",
       10
     ),
+    trialTimeCheckToken:
+      env.TRIAL_TIME_CHECK_TOKEN || "animate-trial-time-check-v1",
     trialFingerprintSalt:
       env.TRIAL_FINGERPRINT_SALT ||
       env.SESSION_SECRET ||

@@ -19,6 +19,8 @@ import { getAesKey, aesDecrypt } from "../crypto/aes";
 import { parseLicenceOuter, parseLicenceInner } from "../licence/codec";
 import { recordTelemetryEvent, TelemetryError } from "../services/telemetry";
 import { startTrial } from "../services/trial";
+import { products } from "../db/schema";
+import { eq } from "drizzle-orm";
 
 type ClientBody = {
   product_id?: string;
@@ -46,8 +48,8 @@ function readClientBody(body: ClientBody) {
   };
 }
 
-function statusFor(err: ActivationError): 400 | 403 | 404 | 409 | 429 | 500 | 502 {
-  return err.statusCode as 400 | 403 | 404 | 409 | 429 | 500 | 502;
+function statusFor(err: ActivationError): 200 | 400 | 403 | 404 | 409 | 429 | 500 | 502 {
+  return err.statusCode as 200 | 400 | 403 | 404 | 409 | 429 | 500 | 502;
 }
 
 function activationErrorBody(err: ActivationError): Record<string, unknown> {
@@ -159,12 +161,27 @@ export function createV1Router(db: Database, config: AppConfig, registry: Provid
     orderFailMax: config.activateRateLimitOrderFailMax,
     orderFailWindowSeconds: config.activateRateLimitOrderFailWindowSeconds,
   });
+  const trialRateLimiter = createRateLimiter(
+    {
+      ipMax: config.activateRateLimitIpMax,
+      ipWindowSeconds: config.activateRateLimitIpWindowSeconds,
+      ipFailMax: config.activateRateLimitIpFailMax,
+      ipFailWindowSeconds: config.activateRateLimitIpFailWindowSeconds,
+      orderFailMax: config.activateRateLimitOrderFailMax,
+      orderFailWindowSeconds: config.activateRateLimitOrderFailWindowSeconds,
+    },
+    {
+      errorCode: "TRIAL_RATE_LIMITED",
+      message: "请求过于频繁，请稍后再试",
+    }
+  );
 
   router.use("/activate", rateLimiter);
   router.use("/refresh", rateLimiter);
   router.use("/deactivate", rateLimiter);
   router.use("/license/status", rateLimiter);
-  router.use("/trials/start", rateLimiter);
+  router.use("/trials/start", trialRateLimiter);
+  router.use("/trials/time-check", trialRateLimiter);
 
   router.post("/telemetry", async (c) => {
     try {
@@ -240,18 +257,47 @@ export function createV1Router(db: Database, config: AppConfig, registry: Provid
         await startTrial(db, config, {
           productId: request.productId,
           fingerprint: request.fingerprint,
-          feature: body.feature || "",
           appVersion: request.appVersion,
           platform: request.platform,
           ipAddress: ip,
         })
       );
     } catch (err) {
-      limiter.recordFailure(ip, request.fingerprint || null);
       if (err instanceof ActivationError) {
+        if (err.statusCode !== 200) {
+          limiter.recordFailure(ip, request.fingerprint || null);
+        }
         return c.json(activationErrorBody(err), statusFor(err));
       }
+      limiter.recordFailure(ip, request.fingerprint || null);
       console.error("Trial start error:", err);
+      return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
+    }
+  });
+
+  router.post("/trials/time-check", async (c) => {
+    const productId = (c.req.header("x-animate-product") || "").trim();
+    const token = c.req.header("x-animate-time-check-token") || "";
+
+    if (!productId) {
+      return c.json({ error: "INVALID_REQUEST", message: "X-Animate-Product 不能为空" }, 400);
+    }
+    if (token !== config.trialTimeCheckToken) {
+      return c.json({ error: "INVALID_REQUEST", message: "time-check token 无效" }, 400);
+    }
+
+    try {
+      const product = await db
+        .select()
+        .from(products)
+        .where(eq(products.productId, productId))
+        .get();
+      if (!product || product.status !== "active") {
+        return c.json({ error: "INVALID_REQUEST", message: "product 不存在或已停用" }, 400);
+      }
+      return c.json({ server_time: Math.floor(Date.now() / 1000) });
+    } catch (err) {
+      console.error("Trial time-check error:", err);
       return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
     }
   });

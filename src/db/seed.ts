@@ -9,6 +9,7 @@ import { plans, products, providerMappings } from "./schema";
 export const DEFAULT_PRODUCT_ID = "animate";
 export const DEFAULT_PLAN_ID = "animate-companion-lifetime-basic-v1";
 export const DEFAULT_TRIAL_PLAN_ID = "animate-import-vrm-trial-24h-v1";
+const DEFAULT_IMPORT_FEATURES = ["import_vrm", "import_dance", "import_stage"];
 
 export async function seedDefaultProduct(db: Database): Promise<void> {
   const existingProduct = await db
@@ -43,12 +44,7 @@ export async function seedDefaultProduct(db: Database): Promise<void> {
       licenseModel: "single_machine",
       maxActivations: 1,
       maxAppMajor: 1,
-      featuresJson: JSON.stringify([
-        "companion",
-        "import_vrm",
-        "import_dance",
-        "import_stage",
-      ]),
+      featuresJson: JSON.stringify(["companion", ...DEFAULT_IMPORT_FEATURES]),
       isActive: true,
       sortOrder: 0,
     });
@@ -64,7 +60,7 @@ export async function seedDefaultProduct(db: Database): Promise<void> {
     await db.insert(plans).values({
       planId: DEFAULT_TRIAL_PLAN_ID,
       productId: DEFAULT_PRODUCT_ID,
-      name: "AniMate Import VRM Trial 24h",
+      name: "AniMate Full Feature Trial 24h",
       edition: "companion",
       tier: "trial",
       billingModel: "trial",
@@ -72,7 +68,7 @@ export async function seedDefaultProduct(db: Database): Promise<void> {
       maxActivations: 1,
       maxAppMajor: 1,
       durationDays: 1,
-      featuresJson: JSON.stringify(["import_vrm"]),
+      featuresJson: JSON.stringify(DEFAULT_IMPORT_FEATURES),
       isActive: true,
       sortOrder: 10,
       metadataJson: JSON.stringify({

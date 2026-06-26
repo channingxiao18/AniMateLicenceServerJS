@@ -226,6 +226,10 @@ export const trialGrants = sqliteTable(
     productFeatureFingerprintIdx: uniqueIndex(
       "trial_grants_product_feature_fingerprint_unique"
     ).on(table.productId, table.feature, table.fingerprintHash),
+    productFingerprintIdx: index("trial_grants_product_fingerprint_idx").on(
+      table.productId,
+      table.fingerprintHash
+    ),
   })
 );
 

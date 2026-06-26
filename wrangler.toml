@@ -27,7 +27,8 @@ ACTIVATE_RATE_LIMIT_ORDER_FAIL_MAX = "8"
 ACTIVATE_RATE_LIMIT_ORDER_FAIL_WINDOW_SECONDS = "3600"
 TELEMETRY_TOKENS = "animate-desktop-prod-v1-0991ed7c066d949eb026d8c5e40f3230:desktop_prod,animate-desktop-dev:desktop_dev"
 TRIAL_ENABLED = "true"
-TRIAL_IMPORT_VRM_DURATION_SECONDS = "86400"
+TRIAL_FULL_FEATURE_DURATION_SECONDS = "86400"
+TRIAL_TIME_CHECK_TOKEN = "animate-trial-time-check-v1"
 
 # Secrets (already set, set via: wrangler secret put <NAME>)
 #   ADMIN_PASSWORD
