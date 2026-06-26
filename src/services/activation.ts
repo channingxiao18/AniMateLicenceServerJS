@@ -29,11 +29,18 @@ import type { ProviderAdapter, ProviderRegistry, ExternalActivationResult } from
 export class ActivationError extends Error {
   error: string;
   statusCode: number;
+  details?: Record<string, unknown>;
 
-  constructor(error: string, message: string, statusCode = 400) {
+  constructor(
+    error: string,
+    message: string,
+    statusCode = 400,
+    details?: Record<string, unknown>
+  ) {
     super(message);
     this.error = error;
     this.statusCode = statusCode;
+    this.details = details;
     this.name = "ActivationError";
   }
 }

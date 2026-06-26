@@ -43,6 +43,7 @@ npm run dev
 
 ### 面向客户端 (v1)
 - `POST /v1/activate` — 激活许可证
+- `POST /v1/trials/start` — 领取一次性试用授权
 - `POST /v1/deactivate` — 停用许可证
 - `POST /v1/refresh` — 刷新授权令牌
 

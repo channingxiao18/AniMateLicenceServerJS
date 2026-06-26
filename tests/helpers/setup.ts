@@ -170,6 +170,24 @@ CREATE TABLE IF NOT EXISTS activation_logs (
   created_at text DEFAULT (datetime('now')) NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS trial_grants (
+  id text PRIMARY KEY NOT NULL,
+  product_id text NOT NULL REFERENCES products(product_id),
+  feature text NOT NULL,
+  fingerprint_hash text NOT NULL,
+  started_at text NOT NULL,
+  valid_until text NOT NULL,
+  duration_seconds integer NOT NULL,
+  status text DEFAULT 'active' NOT NULL,
+  licence_token_hash text,
+  app_version text,
+  platform text,
+  ip_hash text,
+  created_at text DEFAULT (datetime('now')) NOT NULL,
+  updated_at text DEFAULT (datetime('now')) NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS trial_grants_product_feature_fingerprint_unique ON trial_grants (product_id, feature, fingerprint_hash);
+
 CREATE TABLE IF NOT EXISTS telemetry_events (
   event_id text PRIMARY KEY NOT NULL,
   schema_version integer NOT NULL,
@@ -301,6 +319,9 @@ export function createTestConfig(rsaPrivateKeyPkcs8Hex: string): AppConfig {
     creemDefaultPlanId: "animate-companion-lifetime-basic-v1",
     defaultProductId: "animate",
     telemetryTokens: "animate-desktop-prod-v1:desktop_prod,animate-desktop-dev:desktop_dev",
+    trialEnabled: true,
+    trialImportVrmDurationSeconds: 86400,
+    trialFingerprintSalt: "test_trial_salt",
   };
 }
 

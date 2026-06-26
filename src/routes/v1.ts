@@ -18,6 +18,7 @@ import type { ActivateRateLimiter } from "../services/rate_limit";
 import { getAesKey, aesDecrypt } from "../crypto/aes";
 import { parseLicenceOuter, parseLicenceInner } from "../licence/codec";
 import { recordTelemetryEvent, TelemetryError } from "../services/telemetry";
+import { startTrial } from "../services/trial";
 
 type ClientBody = {
   product_id?: string;
@@ -28,6 +29,7 @@ type ClientBody = {
   machine_name?: string;
   app_version?: string;
   platform?: string;
+  feature?: string;
   /** Signed licence token — required for deactivate to prove device ownership. */
   licence_token?: string;
 };
@@ -46,6 +48,14 @@ function readClientBody(body: ClientBody) {
 
 function statusFor(err: ActivationError): 400 | 403 | 404 | 409 | 429 | 500 | 502 {
   return err.statusCode as 400 | 403 | 404 | 409 | 429 | 500 | 502;
+}
+
+function activationErrorBody(err: ActivationError): Record<string, unknown> {
+  return {
+    error: err.error,
+    message: err.message,
+    ...(err.details || {}),
+  };
 }
 
 function telemetryStatusFor(err: TelemetryError): 400 | 401 | 413 | 500 {
@@ -154,6 +164,7 @@ export function createV1Router(db: Database, config: AppConfig, registry: Provid
   router.use("/refresh", rateLimiter);
   router.use("/deactivate", rateLimiter);
   router.use("/license/status", rateLimiter);
+  router.use("/trials/start", rateLimiter);
 
   router.post("/telemetry", async (c) => {
     try {
@@ -201,9 +212,46 @@ export function createV1Router(db: Database, config: AppConfig, registry: Provid
     } catch (err) {
       limiter.recordFailure(ip, request.licenseKey || null);
       if (err instanceof ActivationError) {
-        return c.json({ error: err.error, message: err.message }, statusFor(err));
+        return c.json(activationErrorBody(err), statusFor(err));
       }
       console.error("Activate error:", err);
+      return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
+    }
+  });
+
+  router.post("/trials/start", async (c) => {
+    const limiter = c.get("rateLimiter") as ActivateRateLimiter;
+    const ip = c.get("clientIp") as string;
+
+    let body: ClientBody;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "INVALID_REQUEST", message: "请求体格式无效" }, 400);
+    }
+
+    const request = readClientBody(body);
+    if (!limiter.failuresAllowed(ip, request.fingerprint || null)) {
+      return c.json({ error: "TRIAL_RATE_LIMITED", message: "失败次数过多，请稍后再试" }, 429);
+    }
+
+    try {
+      return c.json(
+        await startTrial(db, config, {
+          productId: request.productId,
+          fingerprint: request.fingerprint,
+          feature: body.feature || "",
+          appVersion: request.appVersion,
+          platform: request.platform,
+          ipAddress: ip,
+        })
+      );
+    } catch (err) {
+      limiter.recordFailure(ip, request.fingerprint || null);
+      if (err instanceof ActivationError) {
+        return c.json(activationErrorBody(err), statusFor(err));
+      }
+      console.error("Trial start error:", err);
       return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
     }
   });
@@ -245,7 +293,7 @@ export function createV1Router(db: Database, config: AppConfig, registry: Provid
       );
     } catch (err) {
       if (err instanceof ActivationError) {
-        return c.json({ error: err.error, message: err.message }, statusFor(err));
+        return c.json(activationErrorBody(err), statusFor(err));
       }
       console.error("Refresh error:", err);
       return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
@@ -282,7 +330,7 @@ export function createV1Router(db: Database, config: AppConfig, registry: Provid
       return c.json({ status: "ok" });
     } catch (err) {
       if (err instanceof ActivationError) {
-        return c.json({ error: err.error, message: err.message }, statusFor(err));
+        return c.json(activationErrorBody(err), statusFor(err));
       }
       console.error("Deactivate error:", err);
       return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
@@ -312,7 +360,7 @@ export function createV1Router(db: Database, config: AppConfig, registry: Provid
       );
     } catch (err) {
       if (err instanceof ActivationError) {
-        return c.json({ error: err.error, message: err.message }, statusFor(err));
+        return c.json(activationErrorBody(err), statusFor(err));
       }
       console.error("Status error:", err);
       return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
@@ -340,7 +388,7 @@ export function createV1Router(db: Database, config: AppConfig, registry: Provid
       );
     } catch (err) {
       if (err instanceof ActivationError) {
-        return c.json({ error: err.error, message: err.message }, statusFor(err));
+        return c.json(activationErrorBody(err), statusFor(err));
       }
       console.error("Status error:", err);
       return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);

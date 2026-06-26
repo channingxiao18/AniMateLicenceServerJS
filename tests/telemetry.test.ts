@@ -41,8 +41,7 @@ describe("telemetry", () => {
       env.db,
       env.config,
       "animate-desktop-prod-v1",
-      event(),
-      new Date("2026-06-17T12:00:00Z")
+      event()
     );
 
     expect(result).toEqual({ ok: true });

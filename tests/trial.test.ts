@@ -1,0 +1,177 @@
+import { eq } from "drizzle-orm";
+import { describe, expect, it } from "vitest";
+import { createTestEnv } from "./helpers/setup";
+import { decryptLicencePayload } from "../src/licence/codec";
+import { trialGrants } from "../src/db/schema";
+import { ActivationError } from "../src/services/activation";
+import { startTrial } from "../src/services/trial";
+
+async function catchActivationError(fn: () => Promise<unknown>): Promise<ActivationError | null> {
+  try {
+    await fn();
+    return null;
+  } catch (err) {
+    if (err instanceof ActivationError) return err;
+    throw err;
+  }
+}
+
+describe("trial licence grants", () => {
+  it("creates a first trial grant and signs a trial-only licence", async () => {
+    const env = await createTestEnv();
+    const before = Date.now();
+
+    const result = await startTrial(env.db, env.config, {
+      productId: "animate",
+      fingerprint: "trial-machine-001",
+      feature: "import_vrm",
+      appVersion: "1.2.0",
+      platform: "windows",
+      ipAddress: "127.0.0.1",
+    });
+
+    expect(result.trial.code).toBe("TRIAL_STARTED");
+    expect(result.trial.status).toBe("active");
+    expect(result.trial.features).toEqual(["import_vrm"]);
+    expect(result.trial.duration_seconds).toBe(86400);
+
+    const [auth, fingerprint] = await decryptLicencePayload(
+      result.licence,
+      env.keys.publicKeySpkiHex
+    );
+    expect(fingerprint).toBe("trial-machine-001");
+    expect(auth.product_id).toBe("animate");
+    expect(auth.tier).toBe("trial");
+    expect(auth.licence_kind).toBe("trial");
+    expect(auth.features).toEqual(["import_vrm"]);
+    expect(auth.valid_day).toBe(0);
+    expect(typeof auth.valid_until).toBe("number");
+
+    const validUntilMs = Number(auth.valid_until) * 1000;
+    expect(validUntilMs - before).toBeGreaterThan(86_390_000);
+    expect(validUntilMs - before).toBeLessThan(86_410_000);
+
+    const stored = await env.db.select().from(trialGrants).all();
+    expect(stored).toHaveLength(1);
+    expect(stored[0].fingerprintHash).not.toContain("trial-machine-001");
+    expect(stored[0].licenceTokenHash).toBeTruthy();
+  });
+
+  it("returns the existing active trial without extending valid_until", async () => {
+    const env = await createTestEnv();
+
+    const first = await startTrial(env.db, env.config, {
+      productId: "animate",
+      fingerprint: "trial-machine-002",
+      feature: "import_vrm",
+      appVersion: "1.2.0",
+      platform: "windows",
+      ipAddress: "127.0.0.1",
+    });
+    const second = await startTrial(env.db, env.config, {
+      productId: "animate",
+      fingerprint: "trial-machine-002",
+      feature: "import_vrm",
+      appVersion: "1.2.1",
+      platform: "windows",
+      ipAddress: "127.0.0.1",
+    });
+
+    expect(second.trial.code).toBe("TRIAL_ACTIVE");
+    expect(second.trial.trial_id).toBe(first.trial.trial_id);
+    expect(second.trial.started_at).toBe(first.trial.started_at);
+    expect(second.trial.valid_until).toBe(first.trial.valid_until);
+
+    const grants = await env.db.select().from(trialGrants).all();
+    expect(grants).toHaveLength(1);
+  });
+
+  it("rejects a repeat request after the trial has expired and returns trial details", async () => {
+    const env = await createTestEnv();
+    env.config.trialImportVrmDurationSeconds = 60;
+
+    const first = await startTrial(env.db, env.config, {
+      productId: "animate",
+      fingerprint: "trial-machine-003",
+      feature: "import_vrm",
+      appVersion: "1.2.0",
+      platform: "windows",
+      ipAddress: "127.0.0.1",
+    });
+
+    await env.db
+      .update(trialGrants)
+      .set({
+        validUntil: "2026-01-01 00:00:00",
+        updatedAt: "2026-01-01 00:00:00",
+      })
+      .where(eq(trialGrants.id, first.trial.trial_id));
+
+    const err = await catchActivationError(() =>
+      startTrial(env.db, env.config, {
+        productId: "animate",
+        fingerprint: "trial-machine-003",
+        feature: "import_vrm",
+        appVersion: "1.2.0",
+        platform: "windows",
+        ipAddress: "127.0.0.1",
+      })
+    );
+
+    expect(err).not.toBeNull();
+    expect(err!.error).toBe("TRIAL_ALREADY_USED");
+    expect(err!.statusCode).toBe(409);
+    expect(err!.details?.trial).toMatchObject({
+      trial_id: first.trial.trial_id,
+      status: "expired",
+      code: "TRIAL_ALREADY_USED",
+      feature: "import_vrm",
+      valid_until: "2026-01-01T00:00:00Z",
+    });
+
+    const grant = await env.db
+      .select()
+      .from(trialGrants)
+      .where(eq(trialGrants.id, first.trial.trial_id))
+      .get();
+    expect(grant?.status).toBe("expired");
+  });
+
+  it("rejects non-VRM trial features", async () => {
+    const env = await createTestEnv();
+
+    const err = await catchActivationError(() =>
+      startTrial(env.db, env.config, {
+        productId: "animate",
+        fingerprint: "trial-machine-004",
+        feature: "import_dance",
+        appVersion: "1.2.0",
+        platform: "windows",
+        ipAddress: "127.0.0.1",
+      })
+    );
+
+    expect(err).not.toBeNull();
+    expect(err!.error).toBe("TRIAL_FEATURE_NOT_ALLOWED");
+    expect(err!.statusCode).toBe(400);
+  });
+
+  it("rejects mismatched products", async () => {
+    const env = await createTestEnv();
+
+    const err = await catchActivationError(() =>
+      startTrial(env.db, env.config, {
+        productId: "unknown-product",
+        fingerprint: "trial-machine-005",
+        feature: "import_vrm",
+        appVersion: "1.2.0",
+        platform: "windows",
+        ipAddress: "127.0.0.1",
+      })
+    );
+
+    expect(err).not.toBeNull();
+    expect(err!.error).toBe("TRIAL_PRODUCT_MISMATCH");
+    expect(err!.statusCode).toBe(400);
+  });
+});

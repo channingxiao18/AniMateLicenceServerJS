@@ -201,6 +201,33 @@ export const activationLogs = sqliteTable("activation_logs", {
   createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
 });
 
+export const trialGrants = sqliteTable(
+  "trial_grants",
+  {
+    id: text("id").primaryKey(),
+    productId: text("product_id")
+      .notNull()
+      .references(() => products.productId),
+    feature: text("feature").notNull(),
+    fingerprintHash: text("fingerprint_hash").notNull(),
+    startedAt: text("started_at").notNull(),
+    validUntil: text("valid_until").notNull(),
+    durationSeconds: integer("duration_seconds").notNull(),
+    status: text("status").notNull().default("active"),
+    licenceTokenHash: text("licence_token_hash"),
+    appVersion: text("app_version"),
+    platform: text("platform"),
+    ipHash: text("ip_hash"),
+    createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+    updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => ({
+    productFeatureFingerprintIdx: uniqueIndex(
+      "trial_grants_product_feature_fingerprint_unique"
+    ).on(table.productId, table.feature, table.fingerprintHash),
+  })
+);
+
 export const telemetryEvents = sqliteTable(
   "telemetry_events",
   {

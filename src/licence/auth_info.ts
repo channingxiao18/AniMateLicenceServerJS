@@ -9,9 +9,11 @@ export interface AuthInfoV2 {
   version: string;
   start_time: number;
   valid_day: number;
+  valid_until?: number;
   product_id: string;
   edition: string;
   tier: string;
+  licence_kind?: "paid" | "trial";
   features: string[];
   max_app_major: number;
 }
@@ -23,8 +25,10 @@ export function createAuthInfo(params: {
   features: string[];
   maxAppMajor: number;
   validDay?: number;
+  validUntil?: number;
+  licenceKind?: "paid" | "trial";
 }): AuthInfoV2 {
-  return {
+  const auth: AuthInfoV2 = {
     version: "2",
     start_time: Math.floor(Date.now() / 1000),
     valid_day: params.validDay ?? 0,
@@ -34,6 +38,9 @@ export function createAuthInfo(params: {
     features: params.features,
     max_app_major: params.maxAppMajor,
   };
+  if (params.validUntil !== undefined) auth.valid_until = params.validUntil;
+  if (params.licenceKind !== undefined) auth.licence_kind = params.licenceKind;
+  return auth;
 }
 
 export function authInfoToJson(auth: AuthInfoV2): string {
