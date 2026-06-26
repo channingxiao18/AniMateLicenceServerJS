@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { createTestEnv, seedPlan, seedProduct } from "./helpers/setup";
 import { decryptLicencePayload } from "../src/licence/codec";
-import { trialGrants } from "../src/db/schema";
+import { plans, trialGrants } from "../src/db/schema";
 import { createAdminApiRouter } from "../src/routes/admin_api";
 import { ActivationError } from "../src/services/activation";
 import { listTrialGrants, startTrial } from "../src/services/trial";
@@ -265,6 +265,31 @@ describe("trial licence grants", () => {
     const result = await startTrial(env.db, env.config, {
       productId: "animate",
       fingerprint: "trial-machine-004",
+      appVersion: "1.2.0",
+      platform: "windows",
+      ipAddress: "127.0.0.1",
+    });
+
+    expect(result.trial.features).toEqual(["import_vrm", "import_dance", "import_stage"]);
+
+    const [auth] = await decryptLicencePayload(
+      result.licence,
+      env.keys.publicKeySpkiHex
+    );
+    expect(auth.features).toEqual(["import_vrm", "import_dance", "import_stage"]);
+  });
+
+  it("normalizes malformed stored plan features before signing trial licences", async () => {
+    const env = await createTestEnv();
+    const malformedFeatures = '["[\\"import_vrm\\"","\\"import_dance\\"","\\"import_stage\\"]"]';
+    await env.db
+      .update(plans)
+      .set({ featuresJson: malformedFeatures })
+      .where(eq(plans.planId, "animate-import-vrm-trial-24h-v1"));
+
+    const result = await startTrial(env.db, env.config, {
+      productId: "animate",
+      fingerprint: "trial-machine-malformed-features",
       appVersion: "1.2.0",
       platform: "windows",
       ipAddress: "127.0.0.1",

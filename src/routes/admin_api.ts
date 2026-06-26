@@ -27,6 +27,7 @@ import {
   updatePlan,
   updateProduct,
 } from "../services/activation";
+import { parsePlanFeatures } from "../services/plan_features";
 import { deleteTrialGrant } from "../services/trial";
 
 import type { ProviderRegistry } from "../services/provider";
@@ -248,10 +249,7 @@ export function createAdminApiRouter(db: Database, _config: AppConfig, registry:
         allowNewDeviceDuringGrace: body.allow_new_device_during_grace !== undefined
           ? String(body.allow_new_device_during_grace) === "true"
           : undefined,
-        features: String(body.features || "")
-          .split(",")
-          .map((x) => x.trim())
-          .filter(Boolean),
+        features: parsePlanFeatures(body.features),
         metadata: readPlanMetadata(body),
         actor: "admin",
         ipAddress: ip(c),
@@ -310,9 +308,7 @@ export function createAdminApiRouter(db: Database, _config: AppConfig, registry:
         allowSelfDeactivate: body.allow_self_deactivate !== undefined ? String(body.allow_self_deactivate) === "true" : null,
         allowReactivation: body.allow_reactivation !== undefined ? String(body.allow_reactivation) === "true" : null,
         allowNewDeviceDuringGrace: body.allow_new_device_during_grace !== undefined ? String(body.allow_new_device_during_grace) === "true" : null,
-        features: body.features !== undefined
-          ? String(body.features).split(",").map((x: string) => x.trim()).filter(Boolean)
-          : null,
+        features: body.features !== undefined ? parsePlanFeatures(body.features) : null,
         metadata: readPlanMetadata(body),
         actor: "admin",
         ipAddress: ip(c),

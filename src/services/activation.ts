@@ -24,6 +24,7 @@ import {
   OrderIdValidationError,
   validateOrderId,
 } from "../licence/order_id";
+import { parsePlanFeatures } from "./plan_features";
 import type { ProviderAdapter, ProviderRegistry, ExternalActivationResult } from "./provider";
 
 export class ActivationError extends Error {
@@ -627,7 +628,7 @@ async function issueBundleLicence(
     productId: bundle.product.productId,
     edition: bundle.plan.edition,
     tier: bundle.plan.tier,
-    features: JSON.parse(bundle.plan.featuresJson || "[]"),
+    features: parsePlanFeatures(bundle.plan.featuresJson),
     maxAppMajor: bundle.plan.maxAppMajor,
     validDay,
   });
@@ -652,7 +653,7 @@ async function entitlementPayload(db: Database, bundle: LicenceBundle): Promise<
     status: bundle.entitlement.status,
     edition: bundle.plan.edition,
     tier: bundle.plan.tier,
-    features: JSON.parse(bundle.plan.featuresJson || "[]"),
+    features: parsePlanFeatures(bundle.plan.featuresJson),
     max_app_major: bundle.plan.maxAppMajor,
     max_activations: bundle.plan.maxActivations,
     used_activations: activeDevices.length,
@@ -1048,7 +1049,7 @@ export async function queryLicenseStatus(
       status: effectiveStatus,
       edition: bundle.plan.edition,
       tier: bundle.plan.tier,
-      features: JSON.parse(bundle.plan.featuresJson || "[]"),
+      features: parsePlanFeatures(bundle.plan.featuresJson),
       max_app_major: bundle.plan.maxAppMajor,
       max_activations: bundle.plan.maxActivations,
       used_activations: activeDevices.length,

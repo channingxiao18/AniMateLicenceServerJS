@@ -9,6 +9,7 @@ import { activationLogs, plans, products, trialGrants } from "../db/schema";
 import { createAuthInfo } from "../licence/auth_info";
 import { issueLicence } from "../licence/codec";
 import { ActivationError, machineIdentityFromFingerprint, nowISO } from "./activation";
+import { parsePlanFeatures } from "./plan_features";
 
 const DEFAULT_TRIAL_GRANT_FEATURE = "trial";
 const LEGACY_TRIAL_GRANT_FEATURE = "import_vrm";
@@ -155,14 +156,7 @@ function parseJsonObject(value: string | null): Record<string, unknown> {
 }
 
 function planFeatures(plan: Plan): string[] {
-  try {
-    const parsed = JSON.parse(plan.featuresJson || "[]");
-    return Array.isArray(parsed)
-      ? parsed.map((item) => String(item)).filter(Boolean)
-      : [];
-  } catch {
-    return [];
-  }
+  return parsePlanFeatures(plan.featuresJson);
 }
 
 function planDurationSeconds(plan: Plan, fallbackSeconds: number): number {
