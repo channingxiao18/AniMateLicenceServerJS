@@ -2,7 +2,7 @@
  * One-time trial licence grants.
  */
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/index";
 import { activationLogs, plans, products, trialGrants } from "../db/schema";
@@ -412,4 +412,47 @@ export async function startTrial(
   });
 
   return responseFromGrant(licence, grant, trialPlan, "TRIAL_STARTED");
+}
+
+export async function listTrialGrants(
+  db: Database,
+  params: { page?: number; pageSize?: number; status?: string; search?: string; productId?: string }
+): Promise<{ items: Array<TrialGrant & { product: Product | null; plan: Plan | null }>; total: number }> {
+  const page = params.page || 1;
+  const pageSize = params.pageSize || 20;
+  const all = await db.select().from(trialGrants).orderBy(desc(trialGrants.createdAt)).all();
+
+  const enriched = [];
+  for (const grant of all) {
+    const product = await db
+      .select()
+      .from(products)
+      .where(eq(products.productId, grant.productId))
+      .get();
+    const plan = grant.planId
+      ? await db.select().from(plans).where(eq(plans.planId, grant.planId)).get()
+      : null;
+    enriched.push({ ...grant, product: product || null, plan: plan || null });
+  }
+
+  let filtered = enriched;
+  if (params.status) filtered = filtered.filter((x) => x.status === params.status);
+  if (params.productId) filtered = filtered.filter((x) => x.productId === params.productId);
+  if (params.search) {
+    const s = params.search.toUpperCase();
+    filtered = filtered.filter(
+      (x) =>
+        x.id.toUpperCase().includes(s) ||
+        x.feature.toUpperCase().includes(s) ||
+        (x.product?.name || "").toUpperCase().includes(s) ||
+        (x.plan?.name || "").toUpperCase().includes(s) ||
+        (x.planId || "").toUpperCase().includes(s) ||
+        x.fingerprintHash.toUpperCase().includes(s) ||
+        (x.appVersion || "").toUpperCase().includes(s) ||
+        (x.platform || "").toUpperCase().includes(s)
+    );
+  }
+
+  const total = filtered.length;
+  return { items: filtered.slice((page - 1) * pageSize, page * pageSize), total };
 }

@@ -19,6 +19,7 @@ import {
   listSubscriptions,
   listWebhookEvents,
 } from "../services/activation";
+import { listTrialGrants } from "../services/trial";
 import { getTelemetryReport, listTelemetryEvents } from "../services/telemetry";
 import {
   createSession,
@@ -71,6 +72,7 @@ const navItems = [
   ["/admin/products", "产品"],
   ["/admin/plans", "套餐"],
   ["/admin/licenses", "兑换码"],
+  ["/admin/trials", "试用"],
   ["/admin/entitlements", "授权权益"],
   ["/admin/subscriptions", "订阅"],
   ["/admin/providers", "支付映射"],
@@ -141,6 +143,15 @@ function shortId(value: string | null): string {
   if (!value) return "-";
   if (value.length <= 12) return value;
   return `${value.slice(0, 6)}...${value.slice(-6)}`;
+}
+
+function prettyJson(value: string | null): string {
+  if (!value) return "-";
+  try {
+    return JSON.stringify(JSON.parse(value));
+  } catch {
+    return value;
+  }
 }
 
 function payloadSummary(payloadJson: string): string {
@@ -274,6 +285,17 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
       "生成"
     );
     return c.html(shell("兑换码", "/admin/licenses", `${flash(c)}<div class="toolbar"><form method="get" class="actions"><input name="search" value="${e(search)}" placeholder="搜索兑换码/邮箱" style="width:220px"><button>搜索</button></form><a class="btn primary" href="#create-license">生成兑换码</a><a class="btn" href="#batch-ops">批量操作</a></div><table><thead><tr><th>兑换码</th><th>状态</th><th>产品</th><th>套餐</th><th>权益</th><th>客户邮箱</th><th>批次</th><th>备注</th><th>来源</th><th>创建时间</th></tr></thead><tbody>${rows || `<tr><td colspan="10" class="muted">暂无兑换码</td></tr>`}</tbody></table>${createLicenseModal}${modal("batch-ops","批量操作","/admin/api/licenses/batch/suspend",`<div><label>兑换码列表 (每行一个或逗号分隔)</label><textarea name="license_keys" rows="6" placeholder="AM-XXXXXXXXXXXX&#10;AM-YYYYYYYYYYYY" required></textarea></div><div><label>操作类型</label><div class="actions" style="margin-top:6px"><button formaction="/admin/api/licenses/batch/suspend">批量暂停</button><button formaction="/admin/api/licenses/batch/revoke" class="danger">批量作废</button><button formaction="/admin/api/licenses/batch/reactivate">批量恢复</button></div></div>`,"执行")}`));
+  });
+
+  router.get("/trials", async (c) => {
+    const page = Number(c.req.query("page") || 1);
+    const result = await listTrialGrants(db, { page, pageSize: 80 });
+    const rows = result.items
+      .map((t) => {
+        return `<tr><td><code>${e(t.id)}</code></td><td>${badge(t.status)}</td><td>${e(t.product?.name || "-")}</td><td>${e(t.plan?.name || "-")}</td><td><code>${e(prettyJson(t.plan?.featuresJson || "[]"))}</code></td><td>${e(t.feature)}</td><td>${e(t.durationSeconds)}</td><td>${e(t.startedAt)}</td><td>${e(t.validUntil)}</td><td><code>${e(shortId(t.fingerprintHash))}</code></td></tr>`;
+      })
+      .join("");
+    return c.html(shell("试用", "/admin/trials", `<div class="toolbar"><div class="muted">查看试用记录、对应产品和套餐。试用最终发放的功能列表沿用套餐正式授权的功能列表。</div></div><table><thead><tr><th>Trial ID</th><th>状态</th><th>产品</th><th>套餐</th><th>正式功能列表</th><th>试用入口</th><th>时长(秒)</th><th>开始</th><th>到期</th><th>指纹哈希</th></tr></thead><tbody>${rows || `<tr><td colspan="10" class="muted">暂无试用记录</td></tr>`}</tbody></table><div class="muted" style="margin-top:10px">共 ${result.total} 条，当前第 ${page} 页</div>`));
   });
 
   router.get("/providers", async (c) => {

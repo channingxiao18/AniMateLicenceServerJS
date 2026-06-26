@@ -4,7 +4,7 @@ import { createTestEnv, seedPlan, seedProduct } from "./helpers/setup";
 import { decryptLicencePayload } from "../src/licence/codec";
 import { trialGrants } from "../src/db/schema";
 import { ActivationError } from "../src/services/activation";
-import { startTrial } from "../src/services/trial";
+import { listTrialGrants, startTrial } from "../src/services/trial";
 
 async function catchActivationError(fn: () => Promise<unknown>): Promise<ActivationError | null> {
   try {
@@ -196,6 +196,30 @@ describe("trial licence grants", () => {
       env.keys.publicKeySpkiHex
     );
     expect(auth.features).toEqual(["import_vrm", "import_dance", "import_stage"]);
+  });
+
+  it("lists trial grants with the same plan features used for signed licences", async () => {
+    const env = await createTestEnv();
+
+    const result = await startTrial(env.db, env.config, {
+      productId: "animate",
+      fingerprint: "trial-machine-list",
+      appVersion: "1.2.0",
+      platform: "windows",
+      ipAddress: "127.0.0.1",
+    });
+
+    const grants = await listTrialGrants(env.db, { page: 1, pageSize: 20 });
+
+    expect(grants.total).toBe(1);
+    expect(grants.items[0].id).toBe(result.trial.trial_id);
+    expect(grants.items[0].product?.name).toBe("AniMate");
+    expect(grants.items[0].plan?.planId).toBe("animate-import-vrm-trial-24h-v1");
+    expect(JSON.parse(grants.items[0].plan?.featuresJson || "[]")).toEqual([
+      "import_vrm",
+      "import_dance",
+      "import_stage",
+    ]);
   });
 
   it("rejects mismatched products", async () => {
