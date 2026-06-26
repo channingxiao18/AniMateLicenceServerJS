@@ -8,6 +8,7 @@ import { plans, products, providerMappings } from "./schema";
 
 export const DEFAULT_PRODUCT_ID = "animate";
 export const DEFAULT_PLAN_ID = "animate-companion-lifetime-basic-v1";
+export const DEFAULT_TRIAL_PLAN_ID = "animate-import-vrm-trial-24h-v1";
 
 export async function seedDefaultProduct(db: Database): Promise<void> {
   const existingProduct = await db
@@ -50,6 +51,34 @@ export async function seedDefaultProduct(db: Database): Promise<void> {
       ]),
       isActive: true,
       sortOrder: 0,
+    });
+  }
+
+  const existingTrialPlan = await db
+    .select()
+    .from(plans)
+    .where(eq(plans.planId, DEFAULT_TRIAL_PLAN_ID))
+    .get();
+
+  if (!existingTrialPlan) {
+    await db.insert(plans).values({
+      planId: DEFAULT_TRIAL_PLAN_ID,
+      productId: DEFAULT_PRODUCT_ID,
+      name: "AniMate Import VRM Trial 24h",
+      edition: "companion",
+      tier: "trial",
+      billingModel: "trial",
+      licenseModel: "single_machine",
+      maxActivations: 1,
+      maxAppMajor: 1,
+      durationDays: 1,
+      featuresJson: JSON.stringify(["import_vrm"]),
+      isActive: true,
+      sortOrder: 10,
+      metadataJson: JSON.stringify({
+        trial_feature: "import_vrm",
+        duration_seconds: 86400,
+      }),
     });
   }
 

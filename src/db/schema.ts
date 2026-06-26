@@ -208,6 +208,7 @@ export const trialGrants = sqliteTable(
     productId: text("product_id")
       .notNull()
       .references(() => products.productId),
+    planId: text("plan_id").references(() => plans.planId),
     feature: text("feature").notNull(),
     fingerprintHash: text("fingerprint_hash").notNull(),
     startedAt: text("started_at").notNull(),

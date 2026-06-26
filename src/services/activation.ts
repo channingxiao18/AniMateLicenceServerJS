@@ -1126,6 +1126,7 @@ export async function createPlan(
     allowReactivation?: boolean;
     allowNewDeviceDuringGrace?: boolean;
     features?: string[];
+    metadata?: Record<string, unknown> | null;
     actor?: string;
     ipAddress?: string | null;
   }
@@ -1159,6 +1160,7 @@ export async function createPlan(
     allowReactivation: params.allowReactivation ?? true,
     allowNewDeviceDuringGrace: params.allowNewDeviceDuringGrace ?? false,
     featuresJson: JSON.stringify(params.features || []),
+    metadataJson: params.metadata ? JSON.stringify(params.metadata) : null,
   });
 
   await writeAuditLog(db, {
@@ -1215,6 +1217,7 @@ export async function updatePlan(
     allowReactivation?: boolean | null;
     allowNewDeviceDuringGrace?: boolean | null;
     features?: string[] | null;
+    metadata?: Record<string, unknown> | null;
     actor?: string;
     ipAddress?: string | null;
   }
@@ -1239,6 +1242,7 @@ export async function updatePlan(
   if (params.allowReactivation !== undefined && params.allowReactivation !== null) after.allowReactivation = params.allowReactivation;
   if (params.allowNewDeviceDuringGrace !== undefined && params.allowNewDeviceDuringGrace !== null) after.allowNewDeviceDuringGrace = params.allowNewDeviceDuringGrace;
   if (params.features !== undefined && params.features !== null) after.featuresJson = JSON.stringify(params.features);
+  if (params.metadata !== undefined && params.metadata !== null) after.metadataJson = JSON.stringify(params.metadata);
 
   await db.update(plans).set(after).where(eq(plans.planId, params.planId));
   await writeAuditLog(db, {

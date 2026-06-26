@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
-import { createTestEnv } from "./helpers/setup";
+import { createTestEnv, seedPlan, seedProduct } from "./helpers/setup";
 import { decryptLicencePayload } from "../src/licence/codec";
 import { trialGrants } from "../src/db/schema";
 import { ActivationError } from "../src/services/activation";
@@ -33,6 +33,8 @@ describe("trial licence grants", () => {
     expect(result.trial.code).toBe("TRIAL_STARTED");
     expect(result.trial.status).toBe("active");
     expect(result.trial.features).toEqual(["import_vrm"]);
+    expect(result.trial.product_id).toBe("animate");
+    expect(result.trial.plan_id).toBe("animate-import-vrm-trial-24h-v1");
     expect(result.trial.duration_seconds).toBe(86400);
 
     const [auth, fingerprint] = await decryptLicencePayload(
@@ -53,6 +55,7 @@ describe("trial licence grants", () => {
 
     const stored = await env.db.select().from(trialGrants).all();
     expect(stored).toHaveLength(1);
+    expect(stored[0].planId).toBe("animate-import-vrm-trial-24h-v1");
     expect(stored[0].fingerprintHash).not.toContain("trial-machine-001");
     expect(stored[0].licenceTokenHash).toBeTruthy();
   });
@@ -84,6 +87,51 @@ describe("trial licence grants", () => {
 
     const grants = await env.db.select().from(trialGrants).all();
     expect(grants).toHaveLength(1);
+  });
+
+  it("uses the matching product trial plan for another product", async () => {
+    const env = await createTestEnv();
+    await seedProduct(env.db, "animuse", "AniMuse");
+    await seedPlan(env.db, {
+      planId: "animuse-vrm-trial-12h",
+      productId: "animuse",
+      name: "AniMuse VRM Trial 12h",
+      edition: "studio",
+      tier: "trial",
+      billingModel: "trial",
+      licenseModel: "single_machine",
+      maxActivations: 1,
+      maxAppMajor: 3,
+      durationDays: null,
+      featuresJson: JSON.stringify(["import_vrm", "animuse_preview"]),
+      metadataJson: JSON.stringify({
+        trial_feature: "import_vrm",
+        duration_seconds: 43200,
+      }),
+    });
+
+    const result = await startTrial(env.db, env.config, {
+      productId: "animuse",
+      fingerprint: "trial-machine-animuse",
+      feature: "import_vrm",
+      appVersion: "3.0.0",
+      platform: "windows",
+      ipAddress: "127.0.0.1",
+    });
+
+    expect(result.trial.plan_id).toBe("animuse-vrm-trial-12h");
+    expect(result.trial.features).toEqual(["import_vrm", "animuse_preview"]);
+    expect(result.trial.duration_seconds).toBe(43200);
+
+    const [auth, fingerprint] = await decryptLicencePayload(
+      result.licence,
+      env.keys.publicKeySpkiHex
+    );
+    expect(fingerprint).toBe("trial-machine-animuse");
+    expect(auth.product_id).toBe("animuse");
+    expect(auth.edition).toBe("studio");
+    expect(auth.max_app_major).toBe(3);
+    expect(auth.features).toEqual(["import_vrm", "animuse_preview"]);
   });
 
   it("rejects a repeat request after the trial has expired and returns trial details", async () => {
@@ -173,5 +221,25 @@ describe("trial licence grants", () => {
     expect(err).not.toBeNull();
     expect(err!.error).toBe("TRIAL_PRODUCT_MISMATCH");
     expect(err!.statusCode).toBe(400);
+  });
+
+  it("rejects products without an active matching trial plan", async () => {
+    const env = await createTestEnv();
+    await seedProduct(env.db, "no-trial-product", "No Trial Product");
+
+    const err = await catchActivationError(() =>
+      startTrial(env.db, env.config, {
+        productId: "no-trial-product",
+        fingerprint: "trial-machine-006",
+        feature: "import_vrm",
+        appVersion: "1.2.0",
+        platform: "windows",
+        ipAddress: "127.0.0.1",
+      })
+    );
+
+    expect(err).not.toBeNull();
+    expect(err!.error).toBe("TRIAL_PLAN_NOT_FOUND");
+    expect(err!.statusCode).toBe(404);
   });
 });

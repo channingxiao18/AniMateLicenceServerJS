@@ -105,6 +105,35 @@ function errorResponse(c: any, err: unknown) {
   return c.json(errorBody, statusCode);
 }
 
+function readPlanMetadata(body: Record<string, unknown>): Record<string, unknown> | null {
+  let metadata: Record<string, unknown> = {};
+  const raw = body.metadata_json;
+  if (raw !== undefined && raw !== null && String(raw).trim()) {
+    try {
+      const parsed = JSON.parse(String(raw));
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        metadata = parsed as Record<string, unknown>;
+      }
+    } catch {
+      throw new ActivationError("INVALID_REQUEST", "metadata_json 格式无效", 400);
+    }
+  }
+
+  const trialFeature = String(body.trial_feature || "").trim();
+  if (trialFeature) metadata.trial_feature = trialFeature;
+
+  const durationRaw = String(body.trial_duration_seconds || "").trim();
+  if (durationRaw) {
+    const duration = Number(durationRaw);
+    if (!Number.isInteger(duration) || duration < 60) {
+      throw new ActivationError("INVALID_REQUEST", "试用时长秒数至少为 60", 400);
+    }
+    metadata.duration_seconds = duration;
+  }
+
+  return Object.keys(metadata).length ? metadata : null;
+}
+
 function parseBatchKeys(body: Record<string, unknown>): string[] {
   const raw = body.license_keys || body.keys || "";
   if (typeof raw === "string") {
@@ -222,6 +251,7 @@ export function createAdminApiRouter(db: Database, _config: AppConfig, registry:
           .split(",")
           .map((x) => x.trim())
           .filter(Boolean),
+        metadata: readPlanMetadata(body),
         actor: "admin",
         ipAddress: ip(c),
       });
@@ -282,6 +312,7 @@ export function createAdminApiRouter(db: Database, _config: AppConfig, registry:
         features: body.features !== undefined
           ? String(body.features).split(",").map((x: string) => x.trim()).filter(Boolean)
           : null,
+        metadata: readPlanMetadata(body),
         actor: "admin",
         ipAddress: ip(c),
       });

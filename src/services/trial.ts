@@ -5,7 +5,7 @@
 import { and, eq } from "drizzle-orm";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/index";
-import { activationLogs, products, trialGrants } from "../db/schema";
+import { activationLogs, plans, products, trialGrants } from "../db/schema";
 import { createAuthInfo } from "../licence/auth_info";
 import { issueLicence } from "../licence/codec";
 import { ActivationError, nowISO } from "./activation";
@@ -13,6 +13,8 @@ import { ActivationError, nowISO } from "./activation";
 const ALLOWED_TRIAL_FEATURE = "import_vrm";
 
 type TrialGrant = typeof trialGrants.$inferSelect;
+type Product = typeof products.$inferSelect;
+type Plan = typeof plans.$inferSelect;
 
 export type TrialResponse = {
   licence: string;
@@ -24,6 +26,9 @@ export type TrialResponse = {
 
 type TrialPayload = {
   trial_id: string;
+  product_id: string;
+  plan_id: string | null;
+  plan_name: string | null;
   feature: string;
   features: string[];
   started_at: string;
@@ -102,10 +107,10 @@ async function writeTrialLog(
   });
 }
 
-async function assertProductUsable(
+async function loadProduct(
   db: Database,
   productId: string
-): Promise<typeof products.$inferSelect> {
+): Promise<Product> {
   const product = await db.select().from(products).where(eq(products.productId, productId)).get();
   if (!product) {
     throw new ActivationError("TRIAL_PRODUCT_MISMATCH", "试用产品不存在", 400);
@@ -116,18 +121,93 @@ async function assertProductUsable(
   return product;
 }
 
+function parseJsonObject(value: string | null): Record<string, unknown> {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function planFeatures(plan: Plan): string[] {
+  try {
+    const parsed = JSON.parse(plan.featuresJson || "[]");
+    return Array.isArray(parsed)
+      ? parsed.map((item) => String(item)).filter(Boolean)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function planTrialFeature(plan: Plan): string | null {
+  const metadata = parseJsonObject(plan.metadataJson);
+  const feature = metadata.trial_feature;
+  return typeof feature === "string" && feature.trim() ? feature.trim() : null;
+}
+
+function planDurationSeconds(plan: Plan, fallbackSeconds: number): number {
+  const metadata = parseJsonObject(plan.metadataJson);
+  const metadataSeconds = Number(metadata.duration_seconds);
+  if (Number.isFinite(metadataSeconds) && metadataSeconds > 0) {
+    return Math.floor(metadataSeconds);
+  }
+  if (plan.durationDays && plan.durationDays > 0) {
+    return plan.durationDays * 86400;
+  }
+  return fallbackSeconds;
+}
+
+async function loadTrialPlan(
+  db: Database,
+  productId: string,
+  feature: string
+): Promise<Plan> {
+  const candidates = await db
+    .select()
+    .from(plans)
+    .where(
+      and(
+        eq(plans.productId, productId),
+        eq(plans.billingModel, "trial"),
+        eq(plans.isActive, true)
+      )
+    )
+    .all();
+
+  const matching = candidates.find((plan) => {
+    const features = planFeatures(plan);
+    const metadataFeature = planTrialFeature(plan);
+    return features.includes(feature) && (!metadataFeature || metadataFeature === feature);
+  });
+
+  if (!matching) {
+    throw new ActivationError(
+      "TRIAL_PLAN_NOT_FOUND",
+      "当前产品未配置可用的试用套餐",
+      404
+    );
+  }
+
+  return matching;
+}
+
 async function issueTrialLicence(
   config: AppConfig,
-  productId: string,
+  plan: Plan,
   grant: TrialGrant,
   fingerprint: string
 ): Promise<string> {
   const auth = createAuthInfo({
-    productId,
-    edition: "companion",
-    tier: "trial",
-    features: [grant.feature],
-    maxAppMajor: 1,
+    productId: plan.productId,
+    edition: plan.edition,
+    tier: plan.tier,
+    features: planFeatures(plan),
+    maxAppMajor: plan.maxAppMajor,
     validDay: 0,
     validUntil: unixSeconds(grant.validUntil),
     licenceKind: "trial",
@@ -147,22 +227,25 @@ async function updateLicenceTokenHash(
     .where(eq(trialGrants.id, grantId));
 }
 
-function responseFromGrant(licence: string, grant: TrialGrant, code: "TRIAL_STARTED" | "TRIAL_ACTIVE"): TrialResponse {
+function responseFromGrant(licence: string, grant: TrialGrant, plan: Plan, code: "TRIAL_STARTED" | "TRIAL_ACTIVE"): TrialResponse {
   return {
     licence,
     trial: {
-      ...trialPayload(grant),
+      ...trialPayload(grant, plan),
       status: "active",
       code,
     },
   };
 }
 
-function trialPayload(grant: TrialGrant): TrialPayload {
+function trialPayload(grant: TrialGrant, plan: Plan): TrialPayload {
   return {
     trial_id: grant.id,
+    product_id: grant.productId,
+    plan_id: grant.planId || plan.planId,
+    plan_name: plan.name,
     feature: grant.feature,
-    features: [grant.feature],
+    features: planFeatures(plan),
     started_at: wireTimestamp(grant.startedAt),
     valid_until: wireTimestamp(grant.validUntil),
     duration_seconds: grant.durationSeconds,
@@ -203,9 +286,13 @@ export async function startTrial(
     );
   }
 
-  await assertProductUsable(db, productId);
+  await loadProduct(db, productId);
+  const trialPlan = await loadTrialPlan(db, productId, feature);
 
-  const durationSeconds = Math.max(60, config.trialImportVrmDurationSeconds || 86400);
+  const durationSeconds = Math.max(
+    60,
+    planDurationSeconds(trialPlan, config.trialImportVrmDurationSeconds || 86400)
+  );
   const fpHash = await fingerprintHash(config, productId, feature, fingerprint);
   const now = new Date();
 
@@ -237,6 +324,7 @@ export async function startTrial(
         responseCode: 409,
         detail: {
           product_id: productId,
+          plan_id: grant.planId || trialPlan.planId,
           feature,
           started_at: wireTimestamp(grant.startedAt),
           valid_until: wireTimestamp(grant.validUntil),
@@ -248,7 +336,7 @@ export async function startTrial(
         409,
         {
           trial: {
-            ...trialPayload(grant),
+            ...trialPayload(grant, trialPlan),
             status: "expired",
             code: "TRIAL_ALREADY_USED",
           },
@@ -256,7 +344,7 @@ export async function startTrial(
       );
     }
 
-    const licence = await issueTrialLicence(config, productId, grant, fingerprint);
+    const licence = await issueTrialLicence(config, trialPlan, grant, fingerprint);
     await updateLicenceTokenHash(db, grant.id, licence);
     await writeTrialLog(db, {
       trialId: grant.id,
@@ -266,12 +354,13 @@ export async function startTrial(
       responseCode: 200,
       detail: {
         product_id: productId,
+        plan_id: grant.planId || trialPlan.planId,
         feature,
         app_version: params.appVersion,
         platform: params.platform,
       },
     });
-    return responseFromGrant(licence, grant, "TRIAL_ACTIVE");
+    return responseFromGrant(licence, grant, trialPlan, "TRIAL_ACTIVE");
   }
 
   const startedAt = dateToISOSeconds(now);
@@ -281,6 +370,7 @@ export async function startTrial(
   await db.insert(trialGrants).values({
     id: trialId,
     productId,
+    planId: trialPlan.planId,
     feature,
     fingerprintHash: fpHash,
     startedAt,
@@ -297,7 +387,7 @@ export async function startTrial(
     throw new ActivationError("SERVER_ERROR", "读取试用记录失败", 500);
   }
 
-  const licence = await issueTrialLicence(config, productId, grant, fingerprint);
+  const licence = await issueTrialLicence(config, trialPlan, grant, fingerprint);
   await updateLicenceTokenHash(db, trialId, licence);
   await writeTrialLog(db, {
     trialId,
@@ -307,11 +397,12 @@ export async function startTrial(
     responseCode: 200,
     detail: {
       product_id: productId,
+      plan_id: trialPlan.planId,
       feature,
       app_version: params.appVersion,
       platform: params.platform,
     },
   });
 
-  return responseFromGrant(licence, grant, "TRIAL_STARTED");
+  return responseFromGrant(licence, grant, trialPlan, "TRIAL_STARTED");
 }

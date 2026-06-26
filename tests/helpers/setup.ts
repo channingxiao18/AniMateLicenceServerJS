@@ -173,6 +173,7 @@ CREATE TABLE IF NOT EXISTS activation_logs (
 CREATE TABLE IF NOT EXISTS trial_grants (
   id text PRIMARY KEY NOT NULL,
   product_id text NOT NULL REFERENCES products(product_id),
+  plan_id text REFERENCES plans(plan_id),
   feature text NOT NULL,
   fingerprint_hash text NOT NULL,
   started_at text NOT NULL,
@@ -418,6 +419,7 @@ export async function seedPlan(
       featuresJson: plan.featuresJson ?? "[]",
       isActive: plan.isActive ?? true,
       sortOrder: plan.sortOrder ?? 0,
+      metadataJson: plan.metadataJson ?? null,
     })
     .run();
 }
@@ -467,6 +469,23 @@ export async function createTestEnv(): Promise<TestEnv> {
     billingModel: "lifetime",
     licenseModel: "single_machine",
     maxActivations: 1,
+  });
+  await seedPlan(db, {
+    planId: "animate-import-vrm-trial-24h-v1",
+    productId: "animate",
+    name: "AniMate Import VRM Trial 24h",
+    edition: "companion",
+    tier: "trial",
+    billingModel: "trial",
+    licenseModel: "single_machine",
+    maxActivations: 1,
+    maxAppMajor: 1,
+    durationDays: 1,
+    featuresJson: JSON.stringify(["import_vrm"]),
+    metadataJson: JSON.stringify({
+      trial_feature: "import_vrm",
+      duration_seconds: 86400,
+    }),
   });
   await seedProviderMapping(db, "creem", "animate-companion-lifetime-basic-v1");
   await seedProviderMapping(db, "mockpay", "animate-companion-lifetime-basic-v1", "mock-ext-prod-001");
