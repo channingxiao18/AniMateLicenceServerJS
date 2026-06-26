@@ -8,7 +8,7 @@ import type { Database } from "../db/index";
 import { activationLogs, plans, products, trialGrants } from "../db/schema";
 import { createAuthInfo } from "../licence/auth_info";
 import { issueLicence } from "../licence/codec";
-import { ActivationError, nowISO } from "./activation";
+import { ActivationError, machineIdentityFromFingerprint, nowISO } from "./activation";
 
 const DEFAULT_TRIAL_GRANT_FEATURE = "trial";
 const LEGACY_TRIAL_GRANT_FEATURE = "import_vrm";
@@ -71,6 +71,18 @@ async function sha256Hex(input: string): Promise<string> {
 }
 
 async function fingerprintHash(
+  config: AppConfig,
+  productId: string,
+  fingerprint: string
+): Promise<string> {
+  const machineIdentity = await machineIdentityFromFingerprint(fingerprint);
+  const stableFingerprint = machineIdentity
+    ? `${machineIdentity.kind}:${machineIdentity.value}`
+    : fingerprint;
+  return sha256Hex(`${config.trialFingerprintSalt}:${productId}:${stableFingerprint}`);
+}
+
+async function rawFingerprintHash(
   config: AppConfig,
   productId: string,
   fingerprint: string
@@ -285,9 +297,11 @@ export async function startTrial(
   );
   const fpHash = await fingerprintHash(config, productId, fingerprint);
   const legacyFpHashes = new Set([
+    await rawFingerprintHash(config, productId, fingerprint),
     await legacyFingerprintHash(config, productId, grantFeature, fingerprint),
     await legacyFingerprintHash(config, productId, LEGACY_TRIAL_GRANT_FEATURE, fingerprint),
   ]);
+  const candidateHashes = Array.from(new Set([fpHash, ...legacyFpHashes]));
   const now = new Date();
 
   const grants = await db
@@ -296,7 +310,7 @@ export async function startTrial(
     .where(
       and(
         eq(trialGrants.productId, productId),
-        inArray(trialGrants.fingerprintHash, [fpHash, ...legacyFpHashes])
+        inArray(trialGrants.fingerprintHash, candidateHashes)
       )
     )
     .all();

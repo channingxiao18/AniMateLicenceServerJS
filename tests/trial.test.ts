@@ -5,6 +5,7 @@ import { decryptLicencePayload } from "../src/licence/codec";
 import { trialGrants } from "../src/db/schema";
 import { ActivationError } from "../src/services/activation";
 import { listTrialGrants, startTrial } from "../src/services/trial";
+import { aesEncrypt, getAesKey, packAesBlob } from "../src/crypto/aes";
 
 async function catchActivationError(fn: () => Promise<unknown>): Promise<ActivationError | null> {
   try {
@@ -14,6 +15,19 @@ async function catchActivationError(fn: () => Promise<unknown>): Promise<Activat
     if (err instanceof ActivationError) return err;
     throw err;
   }
+}
+
+async function fingerprintBlobForMachine(machineId: string, iv: string): Promise<string> {
+  const deviceInfo = {
+    licence_sdk_version: "animate-1.0.0",
+    product_serial_ok: false,
+    product_serial: "",
+    product_uuid_ok: true,
+    product_uuid: machineId,
+    time: Date.now(),
+  };
+  const ciphertextHex = await aesEncrypt(getAesKey(), iv, JSON.stringify(deviceInfo));
+  return packAesBlob(iv, ciphertextHex);
 }
 
 describe("trial licence grants", () => {
@@ -83,6 +97,71 @@ describe("trial licence grants", () => {
     expect(second.trial.trial_id).toBe(first.trial.trial_id);
     expect(second.trial.started_at).toBe(first.trial.started_at);
     expect(second.trial.valid_until).toBe(first.trial.valid_until);
+
+    const grants = await env.db.select().from(trialGrants).all();
+    expect(grants).toHaveLength(1);
+  });
+
+  it("treats changing fingerprint blobs from the same physical machine as the same trial device", async () => {
+    const env = await createTestEnv();
+    const firstFingerprint = await fingerprintBlobForMachine(
+      "trial-same-physical-machine",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    const secondFingerprint = await fingerprintBlobForMachine(
+      "trial-same-physical-machine",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    );
+    const thirdFingerprint = await fingerprintBlobForMachine(
+      "trial-same-physical-machine",
+      "cccccccccccccccccccccccccccccccc"
+    );
+
+    expect(secondFingerprint).not.toBe(firstFingerprint);
+
+    const first = await startTrial(env.db, env.config, {
+      productId: "animate",
+      fingerprint: firstFingerprint,
+      appVersion: "1.2.0",
+      platform: "windows",
+      ipAddress: "127.0.0.1",
+    });
+    const second = await startTrial(env.db, env.config, {
+      productId: "animate",
+      fingerprint: secondFingerprint,
+      appVersion: "1.2.1",
+      platform: "windows",
+      ipAddress: "127.0.0.1",
+    });
+
+    expect(second.trial.code).toBe("TRIAL_ACTIVE");
+    expect(second.trial.trial_id).toBe(first.trial.trial_id);
+
+    await env.db
+      .update(trialGrants)
+      .set({
+        validUntil: "2026-01-01 00:00:00",
+        updatedAt: "2026-01-01 00:00:00",
+      })
+      .where(eq(trialGrants.id, first.trial.trial_id));
+
+    const err = await catchActivationError(() =>
+      startTrial(env.db, env.config, {
+        productId: "animate",
+        fingerprint: thirdFingerprint,
+        appVersion: "1.2.2",
+        platform: "windows",
+        ipAddress: "127.0.0.1",
+      })
+    );
+
+    expect(err).not.toBeNull();
+    expect(err!.error).toBe("TRIAL_ALREADY_USED");
+    expect(err!.details?.trial).toMatchObject({
+      trial_id: first.trial.trial_id,
+      status: "expired",
+      code: "TRIAL_ALREADY_USED",
+    });
 
     const grants = await env.db.select().from(trialGrants).all();
     expect(grants).toHaveLength(1);

@@ -63,7 +63,7 @@ type LicenceBundle = {
   plan: Plan;
 };
 
-type MachineIdentity = {
+export type MachineIdentity = {
   kind: "uuid" | "serial";
   value: string;
 };
@@ -176,7 +176,7 @@ function cleanMachineValue(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-async function machineIdentityFromFingerprint(
+export async function machineIdentityFromFingerprint(
   fingerprint: string
 ): Promise<MachineIdentity | null> {
   try {
