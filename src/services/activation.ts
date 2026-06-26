@@ -18,7 +18,7 @@ import {
   webhookEvents,
 } from "../db/schema";
 import { createAuthInfo } from "../licence/auth_info";
-import { issueLicence, parseAppMajor } from "../licence/codec";
+import { decryptFingerprintBlob, issueLicence, parseAppMajor } from "../licence/codec";
 import {
   generateOrderId,
   OrderIdValidationError,
@@ -61,6 +61,11 @@ type LicenceBundle = {
   entitlement: Entitlement;
   product: Product;
   plan: Plan;
+};
+
+type MachineIdentity = {
+  kind: "uuid" | "serial";
+  value: string;
 };
 
 export function nowISO(): string {
@@ -165,6 +170,67 @@ function assertEntitlementUsable(
       throw new ActivationError("ENTITLEMENT_GRACE", "宽限期内不允许新增设备", 403);
     }
   }
+}
+
+function cleanMachineValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+async function machineIdentityFromFingerprint(
+  fingerprint: string
+): Promise<MachineIdentity | null> {
+  try {
+    const device = await decryptFingerprintBlob(fingerprint);
+    const productUuid = cleanMachineValue(device.product_uuid);
+    if (device.product_uuid_ok === true && productUuid) {
+      return { kind: "uuid", value: productUuid };
+    }
+
+    const productSerial = cleanMachineValue(device.product_serial);
+    if (device.product_uuid_ok !== true && device.product_serial_ok === true && productSerial) {
+      return { kind: "serial", value: productSerial };
+    }
+  } catch {
+    // Legacy tests and old clients may send opaque/plain fingerprints. In that
+    // case we keep the exact-string behavior and do not guess machine identity.
+  }
+  return null;
+}
+
+function isSameMachineIdentity(
+  a: MachineIdentity | null,
+  b: MachineIdentity | null
+): boolean {
+  return !!a && !!b && a.kind === b.kind && a.value === b.value;
+}
+
+async function findActivationBySameMachine(
+  db: Database,
+  entitlementId: number,
+  fingerprint: string
+): Promise<Activation | undefined> {
+  const currentIdentity = await machineIdentityFromFingerprint(fingerprint);
+  if (!currentIdentity) return undefined;
+
+  const candidates = await db
+    .select()
+    .from(activations)
+    .where(eq(activations.entitlementId, entitlementId))
+    .all();
+
+  candidates.sort((a, b) => {
+    if (a.status === b.status) return b.id - a.id;
+    return a.status === "active" ? -1 : 1;
+  });
+
+  for (const activation of candidates) {
+    const existingIdentity = await machineIdentityFromFingerprint(activation.fingerprint);
+    if (isSameMachineIdentity(currentIdentity, existingIdentity)) {
+      return activation;
+    }
+  }
+
+  return undefined;
 }
 
 async function writeActivationLog(
@@ -456,7 +522,7 @@ async function upsertActivation(
     machineName?: string | null;
   }
 ): Promise<{ activation: Activation; reissue: boolean }> {
-  const existing = await db
+  let existing = await db
     .select()
     .from(activations)
     .where(
@@ -466,6 +532,14 @@ async function upsertActivation(
       )
     )
     .get();
+
+  if (!existing) {
+    existing = await findActivationBySameMachine(
+      db,
+      bundle.entitlement.id,
+      params.fingerprint
+    );
+  }
 
   const now = nowISO();
   if (existing) {
@@ -477,6 +551,7 @@ async function upsertActivation(
         .update(activations)
         .set({
           status: "active",
+          fingerprint: params.fingerprint,
           platform: params.platform,
           appVersion: params.appVersion,
           machineName: params.machineName || existing.machineName,
@@ -489,6 +564,7 @@ async function upsertActivation(
       await db
         .update(activations)
         .set({
+          fingerprint: params.fingerprint,
           platform: params.platform,
           appVersion: params.appVersion,
           machineName: params.machineName || existing.machineName,

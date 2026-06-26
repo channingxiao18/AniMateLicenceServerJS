@@ -14,6 +14,7 @@ import {
   seedProviderMapping,
   TestEnv,
 } from "./helpers/setup";
+import { aesEncrypt, getAesKey, packAesBlob } from "../src/crypto/aes";
 import {
   activateOrder,
   refreshLicence,
@@ -91,6 +92,46 @@ async function refresh(
   });
 }
 
+async function fingerprintBlobForMachine(
+  machineId: string,
+  iv: string,
+  options: { useSerial?: boolean } = {}
+): Promise<string> {
+  const useSerial = options.useSerial ?? false;
+  const deviceInfo = {
+    licence_sdk_version: "animate-1.0.0",
+    cpu_info: "",
+    mac_info: {},
+    product_name_ok: false,
+    product_name: "",
+    product_serial_ok: useSerial,
+    product_serial: useSerial ? machineId : "",
+    product_uuid_ok: !useSerial,
+    product_uuid: useSerial ? "" : machineId,
+    product_version_ok: false,
+    product_version: "",
+    bios_date_ok: false,
+    bios_date: "",
+    bios_vendor_ok: false,
+    bios_vendor: "",
+    bios_version_ok: false,
+    bios_version: "",
+    board_name_ok: false,
+    board_name: "",
+    board_serial_ok: false,
+    board_serial: "",
+    board_vendor_ok: false,
+    board_vendor: "",
+    board_version_ok: false,
+    board_version: "",
+    system_disk_name: "",
+    system_disk_serial_number: "",
+    time: 1,
+  };
+  const ciphertextHex = await aesEncrypt(getAesKey(), iv, JSON.stringify(deviceInfo));
+  return packAesBlob(iv, ciphertextHex);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // PRD 7.1 — Lifetime, single-machine
 // ═══════════════════════════════════════════════════════════════════════════
@@ -127,6 +168,63 @@ describe("Scn 7.1: Lifetime single-machine licence", () => {
     const result = await activate(env, licenseKey, clientA.fingerprint);
     expect(result.licence).toBeTruthy();
     expect(result.entitlement.used_activations).toBe(1); // still 1, same device
+  });
+
+  it("same physical machine re-activation succeeds when fingerprint blob changes", async () => {
+    const [blobLicenseKey] = await batchCreateLicenses(env.db, {
+      count: 1,
+      planId: "animate-companion-lifetime-basic-v1",
+      notes: "scenario-7.1-reinstall",
+      batchId: "test-7.1-reinstall",
+      actor: "test",
+      ipAddress: "127.0.0.1",
+    });
+    const firstFingerprint = await fingerprintBlobForMachine(
+      "uuid-reinstall-same-machine",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    const secondFingerprint = await fingerprintBlobForMachine(
+      "uuid-reinstall-same-machine",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    );
+
+    expect(secondFingerprint).not.toBe(firstFingerprint);
+    await activate(env, blobLicenseKey, firstFingerprint);
+
+    const result = await activate(env, blobLicenseKey, secondFingerprint);
+    expect(result.licence).toBeTruthy();
+    expect(result.entitlement.used_activations).toBe(1);
+
+    const status = await queryLicenseStatus(env.db, env.config, {
+      licenseKey: blobLicenseKey,
+      productId: "animate",
+      fingerprint: secondFingerprint,
+    });
+    expect(status.entitlement.current_device_active).toBe(true);
+  });
+
+  it("different physical machine with fingerprint blobs is still rejected", async () => {
+    const [blobLicenseKey] = await batchCreateLicenses(env.db, {
+      count: 1,
+      planId: "animate-companion-lifetime-basic-v1",
+      notes: "scenario-7.1-different-machine",
+      batchId: "test-7.1-different-machine",
+      actor: "test",
+      ipAddress: "127.0.0.1",
+    });
+    const firstFingerprint = await fingerprintBlobForMachine(
+      "uuid-bound-machine",
+      "cccccccccccccccccccccccccccccccc"
+    );
+    const secondFingerprint = await fingerprintBlobForMachine(
+      "uuid-other-machine",
+      "dddddddddddddddddddddddddddddddd"
+    );
+
+    await activate(env, blobLicenseKey, firstFingerprint);
+    const err = await catchError(() => activate(env, blobLicenseKey, secondFingerprint));
+    expect(err).not.toBeNull();
+    expect(err!.error).toBe("ACTIVATION_LIMIT_REACHED");
   });
 
   it("second machine activation is rejected", async () => {
