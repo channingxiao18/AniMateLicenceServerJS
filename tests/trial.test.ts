@@ -31,6 +31,7 @@ describe("trial licence grants", () => {
 
     expect(result.trial.code).toBe("TRIAL_STARTED");
     expect(result.trial.status).toBe("active");
+    expect(result.trial.feature).toBe("trial");
     expect(result.trial.features).toEqual(["import_vrm", "import_dance", "import_stage"]);
     expect(result.trial.product_id).toBe("animate");
     expect(result.trial.plan_id).toBe("animate-import-vrm-trial-24h-v1");
@@ -55,6 +56,7 @@ describe("trial licence grants", () => {
     const stored = await env.db.select().from(trialGrants).all();
     expect(stored).toHaveLength(1);
     expect(stored[0].planId).toBe("animate-import-vrm-trial-24h-v1");
+    expect(stored[0].feature).toBe("trial");
     expect(stored[0].fingerprintHash).not.toContain("trial-machine-001");
     expect(stored[0].licenceTokenHash).toBeTruthy();
   });
@@ -102,7 +104,6 @@ describe("trial licence grants", () => {
       durationDays: null,
       featuresJson: JSON.stringify(["import_vrm", "animuse_preview"]),
       metadataJson: JSON.stringify({
-        trial_feature: "import_vrm",
         duration_seconds: 43200,
       }),
     });
@@ -166,7 +167,7 @@ describe("trial licence grants", () => {
       trial_id: first.trial.trial_id,
       status: "expired",
       code: "TRIAL_ALREADY_USED",
-      feature: "import_vrm",
+      feature: "trial",
       valid_until: "2026-01-01T00:00:00Z",
     });
 

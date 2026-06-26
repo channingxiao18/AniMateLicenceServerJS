@@ -485,7 +485,6 @@ export async function createTestEnv(): Promise<TestEnv> {
     durationDays: 1,
     featuresJson: JSON.stringify(["import_vrm", "import_dance", "import_stage"]),
     metadataJson: JSON.stringify({
-      trial_feature: "import_vrm",
       duration_seconds: 86400,
     }),
   });

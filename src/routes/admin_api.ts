@@ -119,8 +119,8 @@ function readPlanMetadata(body: Record<string, unknown>): Record<string, unknown
     }
   }
 
-  const trialFeature = String(body.trial_feature || "").trim();
-  if (trialFeature) metadata.trial_feature = trialFeature;
+  delete metadata.trial_feature;
+  delete metadata.duration_seconds;
 
   const durationRaw = String(body.trial_duration_seconds || "").trim();
   if (durationRaw) {

@@ -153,16 +153,6 @@ function planFeatures(plan: Plan): string[] {
   }
 }
 
-function planTrialFeature(plan: Plan): string | null {
-  const metadata = parseJsonObject(plan.metadataJson);
-  const feature = metadata.trial_feature;
-  return typeof feature === "string" && feature.trim() ? feature.trim() : null;
-}
-
-function planGrantFeature(plan: Plan): string {
-  return planTrialFeature(plan) || DEFAULT_TRIAL_GRANT_FEATURE;
-}
-
 function planDurationSeconds(plan: Plan, fallbackSeconds: number): number {
   const metadata = parseJsonObject(plan.metadataJson);
   const metadataSeconds = Number(metadata.duration_seconds);
@@ -287,7 +277,7 @@ export async function startTrial(
 
   await loadProduct(db, productId);
   const trialPlan = await loadTrialPlan(db, productId);
-  const grantFeature = planGrantFeature(trialPlan);
+  const grantFeature = DEFAULT_TRIAL_GRANT_FEATURE;
 
   const durationSeconds = Math.max(
     60,

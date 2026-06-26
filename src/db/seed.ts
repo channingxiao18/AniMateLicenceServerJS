@@ -72,7 +72,6 @@ export async function seedDefaultProduct(db: Database): Promise<void> {
       isActive: true,
       sortOrder: 10,
       metadataJson: JSON.stringify({
-        trial_feature: "import_vrm",
         duration_seconds: 86400,
       }),
     });
