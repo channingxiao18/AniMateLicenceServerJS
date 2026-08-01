@@ -152,7 +152,7 @@ function assertPlanUsable(product: Product, plan: Plan): void {
   }
 }
 
-function assertEntitlementUsable(
+function assertEntitlementStatusUsable(
   entitlement: Entitlement,
   mode: "activate" | "refresh",
   plan?: Plan | null
@@ -163,13 +163,24 @@ function assertEntitlementUsable(
   if (entitlement.status === "suspended") {
     throw new ActivationError("ENTITLEMENT_SUSPENDED", "授权已暂停", 403);
   }
-  if (entitlement.status === "expired" || dateIsPast(entitlement.validUntil)) {
+  if (entitlement.status === "expired") {
     throw new ActivationError("ENTITLEMENT_EXPIRED", "授权已过期", 403);
   }
   if (mode === "activate" && entitlement.status === "grace") {
     if (!plan?.allowNewDeviceDuringGrace) {
       throw new ActivationError("ENTITLEMENT_GRACE", "宽限期内不允许新增设备", 403);
     }
+  }
+}
+
+function assertEntitlementUsable(
+  entitlement: Entitlement,
+  mode: "activate" | "refresh",
+  plan?: Plan | null
+): void {
+  assertEntitlementStatusUsable(entitlement, mode, plan);
+  if (dateIsPast(entitlement.validUntil)) {
+    throw new ActivationError("ENTITLEMENT_EXPIRED", "授权已过期", 403);
   }
 }
 
@@ -773,7 +784,8 @@ export async function refreshLicence(
   const bundle = await loadLicenceBundle(db, licenseKey);
   assertProductMatches(productId, bundle);
   assertPlanUsable(bundle.product, bundle.plan);
-  assertEntitlementUsable(bundle.entitlement, "refresh");
+  // Explicit terminal states must never be revived by subscription metadata.
+  assertEntitlementStatusUsable(bundle.entitlement, "refresh");
   assertAppVersion(bundle.plan, params.appVersion);
 
   // Lazy expiration: if subscription is canceled or past_due beyond grace, expire.
@@ -832,6 +844,10 @@ export async function refreshLicence(
       }
     }
   }
+
+  // An active subscription may repair a stale validUntil before the final
+  // expiry check, for example after a delayed or out-of-order renewal webhook.
+  assertEntitlementUsable(bundle.entitlement, "refresh");
 
   const activation = await db
     .select()

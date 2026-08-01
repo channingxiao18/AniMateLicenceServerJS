@@ -1063,8 +1063,8 @@ describe("Bug #4: Refresh syncs validUntil from subscription", () => {
   });
 
   it("refresh updates stale entitlement.validUntil from subscription.currentPeriodEnd", async () => {
-    // Manually advance subscription currentPeriodEnd to the far future
-    // and set entitlement validUntil to the near past
+    const subscriptionValidUntil = addDays(new Date(), 30);
+    const staleEntitlementValidUntil = addDays(new Date(), -1);
     const { subscriptions, entitlements } = await import("../src/db/schema");
     const { eq } = await import("drizzle-orm");
 
@@ -1072,18 +1072,18 @@ describe("Bug #4: Refresh syncs validUntil from subscription", () => {
       .update(subscriptions)
       .set({
         status: "active",
-        currentPeriodEnd: "2027-06-03 00:00:00", // far future
+        currentPeriodEnd: subscriptionValidUntil,
       })
       .where(eq(subscriptions.externalSubscriptionId, "sub_sync_001"));
 
     await env.db
       .update(entitlements)
-      .set({ validUntil: "2026-07-01 00:00:00" }) // stale, near past
+      .set({ validUntil: staleEntitlementValidUntil })
       .where(eq(entitlements.id, 1));
 
     // Refresh should sync validUntil from subscription
     const result = await refresh(env, licenseKey, clientA.fingerprint);
-    expect(result.entitlement.valid_until).toBe("2027-06-03 00:00:00");
+    expect(result.entitlement.valid_until).toBe(subscriptionValidUntil);
   });
 });
 
