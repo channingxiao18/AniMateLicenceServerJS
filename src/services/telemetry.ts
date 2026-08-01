@@ -24,6 +24,7 @@ const EVENT_NAMES = new Set([
 
 const LICENSE_STATES = new Set([
   "free",
+  "trial",
   "active",
   "expired",
   "invalid",
@@ -611,6 +612,140 @@ export async function getTelemetryReport(
     licenseStates: Array.from(stateMap.values()).sort((a, b) => b.activeMachines - a.activeMachines),
     platforms: Array.from(platformMap.values()).sort((a, b) => b.activeMachines - a.activeMachines),
   };
+}
+
+export type TelemetryMachineUsage = {
+  machineHash: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  activeDays: number;
+  launches: number;
+  sessions: number;
+  activeSecs: number;
+  overlayVisibleSecs: number;
+  platform: string;
+  appVersion: string;
+  licenseStates: string[];
+};
+
+/** Aggregate session telemetry by anonymous machine for the selected period. */
+export async function getTelemetryMachineUsage(
+  db: Database,
+  params: { days?: number; productId?: string; limit?: number } = {}
+): Promise<TelemetryMachineUsage[]> {
+  const days = Math.min(90, Math.max(1, params.days || 14));
+  const productId = params.productId || "animate";
+  const start = new Date(Date.now() - (days - 1) * 86400000);
+  const startSql = toSqlDateTime(start);
+
+  const [events, uniques] = await Promise.all([
+    db
+      .select()
+      .from(telemetryEvents)
+      .where(
+        and(
+          gte(telemetryEvents.receivedAt, startSql),
+          eq(telemetryEvents.productId, productId)
+        )
+      )
+      .all(),
+    db
+      .select()
+      .from(telemetryDailyUniques)
+      .where(
+        and(
+          gte(telemetryDailyUniques.day, start.toISOString().slice(0, 10)),
+          eq(telemetryDailyUniques.productId, productId),
+          eq(telemetryDailyUniques.uniqueType, "machine_active")
+        )
+      )
+      .all(),
+  ]);
+
+  const activeDaysByMachine = new Map<string, Set<string>>();
+  for (const row of uniques) {
+    if (!row.uniqueValue) continue;
+    const daysForMachine = activeDaysByMachine.get(row.uniqueValue) || new Set<string>();
+    daysForMachine.add(row.day);
+    activeDaysByMachine.set(row.uniqueValue, daysForMachine);
+  }
+
+  const byMachine = new Map<string, {
+    firstSeenAt: string;
+    lastSeenAt: string;
+    launches: number;
+    sessions: Set<string>;
+    activeSecs: number;
+    overlayVisibleSecs: number;
+    platform: string;
+    appVersion: string;
+    licenseStates: Set<string>;
+  }>();
+  const sessionDurations = new Map<string, { process: number; overlay: number }>();
+
+  const sessionEvents = events
+    .filter((row) => row.machineHash && ["session_start", "session_heartbeat", "session_end"].includes(row.event))
+    .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
+
+  for (const row of sessionEvents) {
+    const machineHash = row.machineHash!;
+    const current = byMachine.get(machineHash) || {
+      firstSeenAt: row.receivedAt,
+      lastSeenAt: row.receivedAt,
+      launches: 0,
+      sessions: new Set<string>(),
+      activeSecs: 0,
+      overlayVisibleSecs: 0,
+      platform: row.platform || "unknown",
+      appVersion: row.appVersion || "unknown",
+      licenseStates: new Set<string>(),
+    };
+    current.firstSeenAt = current.firstSeenAt < row.receivedAt ? current.firstSeenAt : row.receivedAt;
+    current.lastSeenAt = current.lastSeenAt > row.receivedAt ? current.lastSeenAt : row.receivedAt;
+    current.platform = row.platform || current.platform;
+    current.appVersion = row.appVersion || current.appVersion;
+    if (row.licenseState) current.licenseStates.add(row.licenseState);
+    if (row.event === "session_start") current.launches += 1;
+    if (row.sessionId) current.sessions.add(row.sessionId);
+
+    let payload: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(row.payloadJson);
+      if (isObject(parsed)) payload = parsed;
+    } catch {
+      // Ignore malformed historical payloads; the raw event remains available.
+    }
+    if (row.sessionId) {
+      const previous = sessionDurations.get(row.sessionId) || { process: 0, overlay: 0 };
+      const process = safePayloadDuration(payload, "process_duration_secs");
+      const overlay = safePayloadDuration(payload, "overlay_visible_secs");
+      if (process > previous.process) current.activeSecs += process - previous.process;
+      if (overlay > previous.overlay) current.overlayVisibleSecs += overlay - previous.overlay;
+      sessionDurations.set(row.sessionId, {
+        process: Math.max(previous.process, process),
+        overlay: Math.max(previous.overlay, overlay),
+      });
+    }
+    byMachine.set(machineHash, current);
+  }
+
+  const limit = Math.min(500, Math.max(1, params.limit || 200));
+  return Array.from(byMachine.entries())
+    .map(([machineHash, row]) => ({
+      machineHash,
+      firstSeenAt: row.firstSeenAt,
+      lastSeenAt: row.lastSeenAt,
+      activeDays: activeDaysByMachine.get(machineHash)?.size || 0,
+      launches: row.launches,
+      sessions: row.sessions.size,
+      activeSecs: row.activeSecs,
+      overlayVisibleSecs: row.overlayVisibleSecs,
+      platform: row.platform,
+      appVersion: row.appVersion,
+      licenseStates: Array.from(row.licenseStates).sort(),
+    }))
+    .sort((a, b) => b.activeSecs - a.activeSecs || b.activeDays - a.activeDays)
+    .slice(0, limit);
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

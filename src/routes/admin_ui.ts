@@ -21,7 +21,11 @@ import {
 } from "../services/activation";
 import { formatPlanFeatures } from "../services/plan_features";
 import { listTrialGrants } from "../services/trial";
-import { getTelemetryReport, listTelemetryEvents } from "../services/telemetry";
+import {
+  getTelemetryMachineUsage,
+  getTelemetryReport,
+  listTelemetryEvents,
+} from "../services/telemetry";
 import {
   createSession,
   destroySession,
@@ -100,6 +104,7 @@ function shell(title: string, active: string, content: string): string {
 .toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px;flex-wrap:wrap}.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5e9f0;border-radius:8px;overflow:hidden}th,td{font-size:13px;text-align:left;padding:10px;border-bottom:1px solid #edf0f5;vertical-align:middle}
 th{background:#f4f6f9;color:#5f6b7a;font-weight:600}tr:last-child td{border-bottom:0}code{background:#f0f2f5;border-radius:4px;padding:2px 5px}
+.table-card{background:#fff;border:1px solid #e5e9f0;border-radius:8px;overflow:hidden;margin-bottom:14px}.table-card table{border:0;border-radius:0}.table-scroll{overflow-x:auto}.table-scroll table{min-width:760px}.table-caption{padding:14px 16px;border-bottom:1px solid #edf0f5;display:flex;align-items:center;justify-content:space-between;gap:12px}.table-caption h2,.table-caption h3{margin:0;font-size:15px}.table-caption p{margin:4px 0 0;font-size:12px;color:#687386}.num-cell{font-variant-numeric:tabular-nums;white-space:nowrap}.pagination{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;background:#fff;border:1px solid #e5e9f0;border-top:0;border-radius:0 0 8px 8px}.pagination .pages{display:flex;gap:5px;align-items:center}.pagination .btn{min-width:32px;text-align:center;padding:6px 9px}.pagination .current{background:#1e66d0;border-color:#1e66d0;color:#fff}.pagination .disabled{opacity:.45;pointer-events:none}
 .btn,button{display:inline-block;border:1px solid #cfd6e1;background:#fff;color:#1f2630;border-radius:6px;padding:7px 11px;font-size:13px;text-decoration:none;cursor:pointer;white-space:nowrap}
 .primary{background:#1e66d0;border-color:#1e66d0;color:#fff}.danger{border-color:#e35a5a;color:#c43737}.quiet{border-color:transparent;background:#f1f3f6}
 input,select,textarea{border:1px solid #cfd6e1;border-radius:6px;padding:8px 9px;font-size:13px;width:100%;background:#fff}label{font-size:12px;color:#5f6b7a;display:block;margin-bottom:4px}
@@ -144,6 +149,36 @@ function shortId(value: string | null): string {
   if (!value) return "-";
   if (value.length <= 12) return value;
   return `${value.slice(0, 6)}...${value.slice(-6)}`;
+}
+
+function pagination(
+  path: string,
+  page: number,
+  total: number,
+  pageSize: number,
+  params: Record<string, string> = {}
+): string {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  if (totalPages <= 1) return `<div class="pagination"><span class="muted">共 ${total} 条</span></div>`;
+  const makeHref = (value: number) => {
+    const query = new URLSearchParams({ ...params, page: String(value) });
+    return `${path}?${query.toString()}`;
+  };
+  const pages = new Set<number>([1, totalPages, page - 1, page, page + 1]);
+  const pageLinks = Array.from(pages)
+    .filter((value) => value >= 1 && value <= totalPages)
+    .sort((a, b) => a - b)
+    .map((value) => `<a class="btn ${value === page ? "current" : ""}" href="${makeHref(value)}">${value}</a>`)
+    .join("");
+  return `<div class="pagination"><span class="muted">第 ${page} / ${totalPages} 页，共 ${total} 条</span><div class="pages"><a class="btn ${page <= 1 ? "disabled" : ""}" href="${makeHref(Math.max(1, page - 1))}">上一页</a>${pageLinks}<a class="btn ${page >= totalPages ? "disabled" : ""}" href="${makeHref(Math.min(totalPages, page + 1))}">下一页</a></div></div>`;
+}
+
+function formatDuration(seconds: number): string {
+  if (!seconds) return "0 分钟";
+  const minutes = seconds / 60;
+  if (minutes < 1) return `${Math.max(1, Math.round(seconds))} 秒`;
+  if (minutes < 60) return `${minutes.toFixed(minutes >= 10 ? 0 : 1)} 分钟`;
+  return `${(minutes / 60).toFixed(minutes >= 600 ? 0 : 1)} 小时`;
 }
 
 function planMetadata(value: string | null): Record<string, unknown> {
@@ -285,9 +320,15 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
   });
 
   router.get("/licenses", async (c) => {
-    const page = Number(c.req.query("page") || 1);
+    const page = Math.max(1, Number(c.req.query("page") || 1));
     const search = c.req.query("search") || "";
-    const result = await listLicenses(db, { page, pageSize: 30, search });
+    const pageSize = 30;
+    let result = await listLicenses(db, { page, pageSize, search });
+    const lastPage = Math.max(1, Math.ceil(result.total / pageSize));
+    if (page > lastPage) {
+      result = await listLicenses(db, { page: lastPage, pageSize, search });
+    }
+    const displayPage = Math.min(page, lastPage);
     const plans = await listPlans(db);
     const planOptions = plans.map((p) => `<option value="${e(p.planId)}">${e(p.name)} (${e(p.planId)})</option>`).join("");
     const rows = result.items
@@ -300,7 +341,8 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
       `<div><label>套餐</label><select name="plan_id">${planOptions}</select></div><div><label>数量</label><input name="count" type="number" value="10" min="1" max="1000"></div><div><label>客户邮箱</label><input name="customer_email"></div><div><label>批次</label><input name="batch_id"></div><div><label>备注</label><input name="notes"></div>`,
       "生成"
     );
-    return c.html(shell("兑换码", "/admin/licenses", `${flash(c)}<div class="toolbar"><form method="get" class="actions"><input name="search" value="${e(search)}" placeholder="搜索兑换码/邮箱" style="width:220px"><button>搜索</button></form><a class="btn primary" href="#create-license">生成兑换码</a><a class="btn" href="#batch-ops">批量操作</a></div><table><thead><tr><th>兑换码</th><th>状态</th><th>产品</th><th>套餐</th><th>权益</th><th>客户邮箱</th><th>批次</th><th>备注</th><th>来源</th><th>创建时间</th></tr></thead><tbody>${rows || `<tr><td colspan="10" class="muted">暂无兑换码</td></tr>`}</tbody></table>${createLicenseModal}${modal("batch-ops","批量操作","/admin/api/licenses/batch/suspend",`<div><label>兑换码列表 (每行一个或逗号分隔)</label><textarea name="license_keys" rows="6" placeholder="AM-XXXXXXXXXXXX&#10;AM-YYYYYYYYYYYY" required></textarea></div><div><label>操作类型</label><div class="actions" style="margin-top:6px"><button formaction="/admin/api/licenses/batch/suspend">批量暂停</button><button formaction="/admin/api/licenses/batch/revoke" class="danger">批量作废</button><button formaction="/admin/api/licenses/batch/reactivate">批量恢复</button></div></div>`,"执行")}`));
+    const table = `<div class="table-card"><div class="table-caption"><div><h2>兑换码列表</h2><p>点击兑换码进入权益、设备和订阅详情。</p></div><span class="muted">共 ${result.total} 条</span></div><div class="table-scroll"><table><thead><tr><th>兑换码</th><th>状态</th><th>产品</th><th>套餐</th><th>权益</th><th>客户邮箱</th><th>批次</th><th>备注</th><th>来源</th><th>创建时间</th></tr></thead><tbody>${rows || `<tr><td colspan="10" class="muted">暂无兑换码</td></tr>`}</tbody></table></div></div>${pagination("/admin/licenses", displayPage, result.total, pageSize, { search })}`;
+    return c.html(shell("兑换码", "/admin/licenses", `${flash(c)}<div class="toolbar"><form method="get" class="actions"><input name="search" value="${e(search)}" placeholder="搜索兑换码/邮箱" style="width:220px"><button>搜索</button></form><div class="actions"><a class="btn primary" href="#create-license">生成兑换码</a><a class="btn" href="#batch-ops">批量操作</a></div></div>${table}${createLicenseModal}${modal("batch-ops","批量操作","/admin/api/licenses/batch/suspend",`<div><label>兑换码列表 (每行一个或逗号分隔)</label><textarea name="license_keys" rows="6" placeholder="AM-XXXXXXXXXXXX&#10;AM-YYYYYYYYYYYY" required></textarea></div><div><label>操作类型</label><div class="actions" style="margin-top:6px"><button formaction="/admin/api/licenses/batch/suspend">批量暂停</button><button formaction="/admin/api/licenses/batch/revoke" class="danger">批量作废</button><button formaction="/admin/api/licenses/batch/reactivate">批量恢复</button></div></div>`,"执行")}`));
   });
 
   router.get("/trials", async (c) => {
@@ -437,9 +479,10 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
   });
 
   router.get("/telemetry/reports", async (c) => {
-    const days = Number(c.req.query("days") || 14);
+    const days = Math.min(90, Math.max(1, Number(c.req.query("days") || 14)));
     const productId = c.req.query("product_id") || "animate";
     const report = await getTelemetryReport(db, { days, productId });
+    const machineUsage = await getTelemetryMachineUsage(db, { days, productId, limit: 200 });
     const cards = [
       ["下载", report.totals.downloads],
       ["首次安装", report.totals.installs],
@@ -453,6 +496,9 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     const dailyRows = report.daily
       .map((r) => `<tr><td>${e(r.day)}</td><td>${r.downloads}</td><td>${r.installs}</td><td>${r.activeMachines}</td><td>${r.launches}</td><td>${formatHours(r.activeSecs)}</td><td>${formatHours(r.overlayVisibleSecs)}</td><td>${r.events}</td></tr>`)
       .join("");
+    const usageRows = machineUsage
+      .map((r) => `<tr><td><code>${e(shortId(r.machineHash))}</code></td><td>${e(r.firstSeenAt)}</td><td>${e(r.lastSeenAt)}</td><td class="num-cell">${r.activeDays}</td><td class="num-cell">${r.launches}</td><td class="num-cell">${r.sessions}</td><td class="num-cell">${e(formatDuration(r.activeSecs))}</td><td class="num-cell">${e(formatDuration(r.overlayVisibleSecs))}</td><td>${e(r.platform)}</td><td>${e(r.appVersion)}</td><td>${r.licenseStates.map((state) => badge(state)).join(" ") || badge("unknown")}</td></tr>`)
+      .join("");
     const versionRows = report.versions
       .map((r) => `<tr><td>${e(r.appVersion)}</td><td>${r.activeMachines}</td><td>${r.launches}</td><td>${formatHours(r.activeSecs)}</td></tr>`)
       .join("");
@@ -462,7 +508,10 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     const platformRows = report.platforms
       .map((r) => `<tr><td>${e(r.platform)}</td><td>${r.activeMachines}</td><td>${r.installs}</td><td>${r.downloads}</td></tr>`)
       .join("");
-    return c.html(shell("统计报表", "/admin/telemetry/reports", `<div class="toolbar"><form method="get" class="actions"><label style="width:130px">产品<input name="product_id" value="${e(productId)}"></label><label style="width:120px">天数<input name="days" type="number" value="${days}" min="1" max="90"></label><button>刷新</button></form><a class="btn" href="/admin/telemetry/events">查看事件</a></div><div class="grid stats">${cards}</div><h3>每日趋势</h3><table><thead><tr><th>日期</th><th>下载</th><th>安装</th><th>活跃机器</th><th>启动</th><th>运行时长</th><th>Overlay 时长</th><th>事件</th></tr></thead><tbody>${dailyRows || `<tr><td colspan="8" class="muted">暂无数据</td></tr>`}</tbody></table><div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-top:14px"><div><h3>版本分布</h3><table><thead><tr><th>版本</th><th>活跃机器</th><th>启动</th><th>运行时长</th></tr></thead><tbody>${versionRows || `<tr><td colspan="4" class="muted">暂无数据</td></tr>`}</tbody></table></div><div><h3>授权状态</h3><table><thead><tr><th>状态</th><th>活跃机器</th><th>启动</th></tr></thead><tbody>${stateRows || `<tr><td colspan="3" class="muted">暂无数据</td></tr>`}</tbody></table></div><div><h3>平台分布</h3><table><thead><tr><th>平台</th><th>活跃机器</th><th>安装</th><th>下载</th></tr></thead><tbody>${platformRows || `<tr><td colspan="4" class="muted">暂无数据</td></tr>`}</tbody></table></div></div>`));
+    const dayOptions = [7, 14, 30, 60, 90].map((value) => `<option value="${value}"${value === days ? " selected" : ""}>最近 ${value} 天</option>`).join("");
+    const dailyTable = `<div class="table-card"><div class="table-caption"><div><h2>每日趋势</h2><p>活跃机器为当天去重的匿名设备数。</p></div></div><div class="table-scroll"><table><thead><tr><th>日期</th><th>下载</th><th>安装</th><th>活跃机器</th><th>启动</th><th>运行时长</th><th>Overlay 时长</th><th>事件</th></tr></thead><tbody>${dailyRows || `<tr><td colspan="8" class="muted">暂无数据</td></tr>`}</tbody></table></div></div>`;
+    const usageTable = `<div class="table-card"><div class="table-caption"><div><h2>设备使用明细</h2><p>按匿名设备汇总，不包含可识别个人信息；按总运行时长排序。</p></div><span class="muted">${machineUsage.length} 台设备</span></div><div class="table-scroll"><table><thead><tr><th>设备</th><th>首次活跃</th><th>最后活跃</th><th>活跃天数</th><th>启动</th><th>会话</th><th>运行时长</th><th>Overlay 时长</th><th>平台</th><th>版本</th><th>授权状态</th></tr></thead><tbody>${usageRows || `<tr><td colspan="11" class="muted">暂无会话数据</td></tr>`}</tbody></table></div></div>`;
+    return c.html(shell("统计报表", "/admin/telemetry/reports", `<div class="toolbar"><form method="get" class="actions"><label style="width:130px">产品<input name="product_id" value="${e(productId)}"></label><label style="width:150px">统计周期<select name="days">${dayOptions}</select></label><button class="primary">刷新统计</button></form><a class="btn" href="/admin/telemetry/events">查看原始事件</a></div><div class="grid stats">${cards}</div>${dailyTable}${usageTable}<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-top:14px"><div class="table-card"><div class="table-caption"><h3>版本分布</h3></div><table><thead><tr><th>版本</th><th>活跃机器</th><th>启动</th><th>运行时长</th></tr></thead><tbody>${versionRows || `<tr><td colspan="4" class="muted">暂无数据</td></tr>`}</tbody></table></div><div class="table-card"><div class="table-caption"><h3>授权状态</h3></div><table><thead><tr><th>状态</th><th>活跃机器</th><th>启动</th></tr></thead><tbody>${stateRows || `<tr><td colspan="3" class="muted">暂无数据</td></tr>`}</tbody></table></div><div class="table-card"><div class="table-caption"><h3>平台分布</h3></div><table><thead><tr><th>平台</th><th>活跃机器</th><th>安装</th><th>下载</th></tr></thead><tbody>${platformRows || `<tr><td colspan="4" class="muted">暂无数据</td></tr>`}</tbody></table></div></div>`));
   });
 
   router.get("/telemetry/events", async (c) => {
