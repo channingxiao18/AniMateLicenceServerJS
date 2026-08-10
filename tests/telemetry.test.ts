@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestEnv } from "./helpers/setup";
 import {
+  getProductAnalyticsReport,
   getTelemetryReport,
   recordTelemetryEvent,
   TelemetryError,
@@ -148,5 +149,117 @@ describe("telemetry", () => {
     const report = await getTelemetryReport(env.db, { days: 1, productId: "animate" });
     expect(report.totals.downloads).toBe(1);
     expect(report.totals.activeMachines).toBe(0);
+  });
+
+  it("accepts a v2 checkpoint without session_start and counts its baseline", async () => {
+    const env = await createTestEnv();
+    await recordTelemetryEvent(
+      env.db,
+      env.config,
+      "animate-desktop-prod-v1",
+      event({
+        schema_version: 2,
+        event_id: "77777777-7777-4777-8777-777777777777",
+        event: "session_checkpoint",
+        channel: "microsoft_store",
+        license_state: "trial",
+        payload: {
+          seq: 1,
+          process_duration_secs: 120,
+          companion_visible_secs: 90,
+          workshop_visible_secs: 10,
+        },
+      })
+    );
+
+    const report = await getTelemetryReport(env.db, { days: 1, productId: "animate" });
+    expect(report.totals.activeSecs).toBe(120);
+    expect(report.totals.overlayVisibleSecs).toBe(90);
+  });
+
+  it("stores product events without treating them as session duration", async () => {
+    const env = await createTestEnv();
+    await recordTelemetryEvent(
+      env.db,
+      env.config,
+      "animate-desktop-prod-v1",
+      event({
+        schema_version: 2,
+        event_id: "88888888-8888-4888-8888-888888888888",
+        event: "model_import_completed",
+        payload: {
+          surface: "avatar_manager",
+          format: "vrm",
+          result: "success",
+          size_bucket: "10mb_50mb",
+        },
+      })
+    );
+
+    const rows = await env.db.select().from(telemetryEvents).all();
+    expect(rows[0].event).toBe("model_import_completed");
+    const report = await getTelemetryReport(env.db, { days: 1, productId: "animate" });
+    expect(report.totals.activeSecs).toBe(0);
+  });
+
+  it("records free-model guide clicks with their entry surface", async () => {
+    const env = await createTestEnv();
+    await recordTelemetryEvent(
+      env.db,
+      env.config,
+      "animate-desktop-prod-v1",
+      event({
+        schema_version: 2,
+        event_id: "99999999-9999-4999-8999-999999999999",
+        event: "free_model_guide_clicked",
+        payload: { surface: "workshop_model_card" },
+      })
+    );
+
+    const rows = await env.db.select().from(telemetryEvents).all();
+    expect(rows[0].event).toBe("free_model_guide_clicked");
+    expect(JSON.parse(rows[0].payloadJson || "{}")).toEqual({
+      surface: "workshop_model_card",
+    });
+    const report = await getTelemetryReport(env.db, { days: 1, productId: "animate" });
+    expect(report.totals.activeSecs).toBe(0);
+  });
+
+  it("builds device-based product funnels in event order", async () => {
+    const env = await createTestEnv();
+    const machine = "b".repeat(64);
+    const base = event({ machine_hash: machine, sent_at: 1781680000 });
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      event: "free_model_guide_clicked",
+      payload: { surface: "import_dialog" },
+    });
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      sent_at: 1781680001,
+      event: "model_import_clicked",
+      payload: { surface: "avatar_manager" },
+    });
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      sent_at: 1781680002,
+      event: "model_import_picker_opened",
+      payload: { surface: "avatar_manager" },
+    });
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      sent_at: 1781680003,
+      event: "model_import_completed",
+      payload: { result: "success" },
+    });
+
+    const report = await getProductAnalyticsReport(env.db, { days: 90, productId: "animate" });
+    expect(report.funnels.freeModel.stages.map((stage) => stage.devices)).toEqual([1, 1, 1]);
+    expect(report.freeModelSurfaces.find((surface) => surface.surface === "import_dialog")?.funnel.stages[2].devices).toBe(1);
+    expect(report.funnels.import.stages[2].fromFirstPct).toBe(100);
   });
 });

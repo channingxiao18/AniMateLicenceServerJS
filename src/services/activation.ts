@@ -788,7 +788,9 @@ export async function refreshLicence(
   assertEntitlementStatusUsable(bundle.entitlement, "refresh");
   assertAppVersion(bundle.plan, params.appVersion);
 
-  // Lazy expiration: if subscription is canceled or past_due beyond grace, expire.
+  // The subscription is authoritative for time-based access. Reconcile it before
+  // checking entitlement.validUntil so a delayed renewal webhook cannot turn a
+  // paid customer into an expired customer during refresh.
   const subscription = await db
     .select()
     .from(subscriptions)
@@ -796,6 +798,10 @@ export async function refreshLicence(
     .get();
 
   if (subscription) {
+    const protectedStatus =
+      bundle.entitlement.status === "revoked" ||
+      bundle.entitlement.status === "suspended";
+
     if (subscription.status === "canceled" && subscription.currentPeriodEnd) {
       if (dateIsPast(subscription.currentPeriodEnd)) {
         await db
@@ -803,6 +809,19 @@ export async function refreshLicence(
           .set({ status: "expired", updatedAt: nowISO() })
           .where(eq(entitlements.id, bundle.entitlement.id));
         throw new ActivationError("ENTITLEMENT_EXPIRED", "订阅已过期", 403);
+      } else if (!protectedStatus) {
+        await db
+          .update(entitlements)
+          .set({
+            status: "active",
+            validUntil: subscription.currentPeriodEnd,
+            graceUntil: null,
+            updatedAt: nowISO(),
+          })
+          .where(eq(entitlements.id, bundle.entitlement.id));
+        bundle.entitlement.status = "active";
+        bundle.entitlement.validUntil = subscription.currentPeriodEnd;
+        bundle.entitlement.graceUntil = null;
       }
     }
 
@@ -813,18 +832,23 @@ export async function refreshLicence(
       subscription.currentPeriodEnd
     ) {
       const entitlementValidUntil = bundle.entitlement.validUntil;
-      if (
-        !entitlementValidUntil ||
-        subscription.currentPeriodEnd > entitlementValidUntil
-      ) {
+      if (!protectedStatus && (
+        entitlementValidUntil !== subscription.currentPeriodEnd ||
+        bundle.entitlement.status !== "active" ||
+        bundle.entitlement.graceUntil !== null
+      )) {
         await db
           .update(entitlements)
           .set({
+            status: "active",
             validUntil: subscription.currentPeriodEnd,
+            graceUntil: null,
             updatedAt: nowISO(),
           })
           .where(eq(entitlements.id, bundle.entitlement.id));
+        bundle.entitlement.status = "active";
         bundle.entitlement.validUntil = subscription.currentPeriodEnd;
+        bundle.entitlement.graceUntil = null;
       }
     }
 
@@ -841,6 +865,19 @@ export async function refreshLicence(
           .set({ status: "expired", updatedAt: nowISO() })
           .where(eq(entitlements.id, bundle.entitlement.id));
         throw new ActivationError("ENTITLEMENT_EXPIRED", "宽限期已过，订阅已过期", 403);
+      } else if (!protectedStatus) {
+        await db
+          .update(entitlements)
+          .set({
+            status: "grace",
+            validUntil: graceExpiry,
+            graceUntil: graceExpiry,
+            updatedAt: nowISO(),
+          })
+          .where(eq(entitlements.id, bundle.entitlement.id));
+        bundle.entitlement.status = "grace";
+        bundle.entitlement.validUntil = graceExpiry;
+        bundle.entitlement.graceUntil = graceExpiry;
       }
     }
   }

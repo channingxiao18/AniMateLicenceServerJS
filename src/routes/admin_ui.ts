@@ -22,9 +22,11 @@ import {
 import { formatPlanFeatures } from "../services/plan_features";
 import { listTrialGrants } from "../services/trial";
 import {
+  getProductAnalyticsReport,
   getTelemetryMachineUsage,
   getTelemetryReport,
   listTelemetryEvents,
+  type ProductFunnel,
 } from "../services/telemetry";
 import {
   createSession,
@@ -82,6 +84,7 @@ const navItems = [
   ["/admin/subscriptions", "订阅"],
   ["/admin/providers", "支付映射"],
   ["/admin/telemetry/reports", "统计报表"],
+  ["/admin/telemetry/products", "产品分析"],
   ["/admin/telemetry/events", "统计事件"],
   ["/admin/logs", "日志"],
 ];
@@ -115,6 +118,8 @@ input,select,textarea{border:1px solid #cfd6e1;border-radius:6px;padding:8px 9px
 .modal-head{padding:16px 18px;border-bottom:1px solid #edf0f5}.modal-head h2{font-size:17px;margin:0}.modal-body{padding:18px}.modal-form{display:grid;gap:12px}.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:6px}
 .flash{padding:9px 12px;background:#e9f8ef;border:1px solid #bee8ca;color:#247942;border-radius:8px;margin-bottom:14px}.flash-err{background:#ffeded;border-color:#ffd0d0;color:#c43737}
 .inline-form{display:flex;gap:7px;align-items:center}.inline-form input{min-width:150px}
+.funnel{display:grid;gap:10px}.funnel-stage{display:grid;grid-template-columns:minmax(120px,1fr) minmax(180px,3fr) 90px 90px;gap:10px;align-items:center}
+.funnel-bar{height:28px;background:#edf1f6;border-radius:5px;overflow:hidden}.funnel-fill{height:100%;min-width:2px;background:#1e66d0}.funnel-value{font-weight:700}.decision{border-left:4px solid #1e66d0;padding:10px 12px;background:#f3f7fd;margin:8px 0}.decision.warn{border-left-color:#d58a00;background:#fff8e8;color:#6f4b00}.decision.bad{border-left-color:#d64848;background:#fff0f0;color:#8e2929}
 @media(max-width:800px){.app{grid-template-columns:1fr}.side{position:static;height:auto}.logout{position:static}.head{padding:0 16px}.wrap{padding:16px}}
 </style></head><body><div class="app"><aside class="side"><div class="brand">授权平台</div>${nav}<a class="logout" href="/admin/logout">退出</a></aside><section class="main"><header class="head"><h1>${e(title)}</h1><span class="muted">Admin</span></header><main class="wrap">${content}</main></section></div></body></html>`;
 }
@@ -215,6 +220,16 @@ function payloadSummary(payloadJson: string): string {
   } catch {
     return payloadJson.slice(0, 80);
   }
+}
+
+function renderFunnel(funnel: ProductFunnel): string {
+  const first = funnel.stages[0]?.devices || 0;
+  const stages = funnel.stages.map((stage, index) => {
+    const width = first > 0 ? Math.max(2, Math.round((stage.devices / first) * 100)) : 0;
+    const rate = index === 0 ? "起点" : `${stage.fromPreviousPct}% / 上一步`;
+    return `<div class="funnel-stage"><div><b>${e(stage.label)}</b><div class="muted">${stage.events} 次事件</div></div><div class="funnel-bar"><div class="funnel-fill" style="width:${width}%"></div></div><div class="funnel-value">${stage.devices} 设备</div><div class="muted">${rate}</div></div>`;
+  }).join("");
+  return `<div class="card"><h3>${e(funnel.label)}</h3><div class="funnel">${stages || `<div class="muted">暂无数据</div>`}</div></div>`;
 }
 
 export async function renderAdminDashboard(db: Database, successMessage = ""): Promise<string> {
@@ -476,6 +491,87 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
       <h3>设备 (${devices.filter((d) => d.status === "active").length} 活跃)</h3>
       <table><thead><tr><th>机器 ID</th><th>状态</th><th>平台</th><th>激活时间</th><th>最后在线</th></tr></thead><tbody>${deviceRows || `<tr><td colspan="5" class="muted">暂无设备</td></tr>`}</tbody></table>
     `));
+  });
+
+  router.get("/telemetry/products", async (c) => {
+    const days = Number(c.req.query("days") || 14);
+    const productId = c.req.query("product_id") || "animate";
+    const appVersion = c.req.query("app_version") || undefined;
+    const channel = c.req.query("channel") || undefined;
+    const licenseState = c.req.query("license_state") || undefined;
+    const report = await getProductAnalyticsReport(db, {
+      days,
+      productId,
+      appVersion,
+      channel,
+      licenseState,
+    });
+    const importStart = report.funnels.import.stages[0]?.devices || 0;
+    const importDone = report.funnels.import.stages.at(-1)?.devices || 0;
+    const freeStart = report.funnels.freeModel.stages[0]?.devices || 0;
+    const freeDone = report.funnels.freeModel.stages.at(-1)?.devices || 0;
+    const purchaseStart = report.funnels.purchase.stages[0]?.devices || 0;
+    const checkoutDone = report.funnels.purchase.stages.at(-1)?.devices || 0;
+    const conversion = (done: number, start: number) => start > 0 ? Math.round((done / start) * 1000) / 10 : 0;
+    const cards = [
+      ["有产品行为的设备", report.totals.devices],
+      ["产品事件", report.totals.events],
+      ["导入成功率", `${conversion(importDone, importStart)}%`],
+      ["免费模型→导入成功", `${conversion(freeDone, freeStart)}%`],
+      ["购买页打开率", `${conversion(checkoutDone, purchaseStart)}%`],
+      ["导入失败设备率", `${report.totals.importFailureRatePct}%`],
+    ].map(([label, value]) => `<div class="card stat"><div class="num">${e(value)}</div><div class="muted">${e(label)}</div></div>`).join("");
+
+    const decisions: string[] = [];
+    if (report.totals.devices === 0) {
+      decisions.push(`<div class="decision">当前筛选范围没有产品事件。先确认客户端版本、渠道和服务端部署版本，再判断转化。</div>`);
+    }
+    if (importStart >= 5 && conversion(importDone, importStart) < 50) {
+      decisions.push(`<div class="decision bad">导入完成率低于 50%。优先查看失败/取消占比和 <code>model_import_failed</code> 的错误分类。</div>`);
+    }
+    if (report.totals.importFailureRatePct >= 10) {
+      decisions.push(`<div class="decision bad">导入失败设备率达到 ${report.totals.importFailureRatePct}%。建议按版本分组定位回归版本。</div>`);
+    }
+    if (freeStart >= 5 && conversion(freeDone, freeStart) < 15) {
+      decisions.push(`<div class="decision warn">点击免费模型后导入成功率低于 15%。需要检查落地页模型获取流程，以及用户返回应用后的导入入口是否清晰。</div>`);
+    }
+    if (purchaseStart >= 5 && conversion(checkoutDone, purchaseStart) < 80) {
+      decisions.push(`<div class="decision bad">购买页打开率低于 80%。优先排查系统浏览器调用、链接和网络问题。</div>`);
+    }
+    if (purchaseStart > 0 && report.totals.checkoutFailureRatePct > 0) {
+      decisions.push(`<div class="decision warn">有 ${report.totals.checkoutFailureRatePct}% 的购买点击设备报告打开失败。</div>`);
+    }
+
+    const surfaceRows = report.freeModelSurfaces.map((item) => {
+      const start = item.funnel.stages[0]?.devices || 0;
+      const imported = item.funnel.stages[1]?.devices || 0;
+      const completed = item.funnel.stages[2]?.devices || 0;
+      const clickEvents = item.funnel.stages[0]?.events || 0;
+      return `<tr><td>${e(item.label)}</td><td><code>${e(item.surface)}</code></td><td>${clickEvents}</td><td>${start}</td><td>${imported}</td><td>${completed}</td><td>${conversion(completed, start)}%</td></tr>`;
+    }).join("");
+    const dimensionRows = report.dimensions.map((row) => `<tr><td>${e(row.appVersion)}</td><td>${e(row.channel)}</td><td>${badge(row.licenseState)}</td><td>${row.devices}</td><td>${row.freeModelDevices}</td><td>${row.importDevices}</td><td>${row.importCompletedDevices}</td><td>${row.importConversionPct}%</td><td>${row.purchaseDevices}</td><td>${row.checkoutOpenPct}%</td></tr>`).join("");
+    const outcomeRows = [
+      ["导入失败", report.outcomes.failedImports.events, report.outcomes.failedImports.devices, `${report.totals.importFailureRatePct}%`],
+      ["用户取消导入", report.outcomes.cancelledImports.events, report.outcomes.cancelledImports.devices, `${report.totals.importCancelRatePct}%`],
+      ["购买页打开失败", report.outcomes.purchaseFailures.events, report.outcomes.purchaseFailures.devices, `${report.totals.checkoutFailureRatePct}%`],
+    ].map(([label, eventCount, devices, rate]) => `<tr><td>${e(label)}</td><td>${eventCount}</td><td>${devices}</td><td>${rate}</td></tr>`).join("");
+
+    const content = `<div class="toolbar"><form method="get" class="actions">
+      <label style="width:120px">产品<input name="product_id" value="${e(productId)}"></label>
+      <label style="width:90px">天数<input name="days" type="number" value="${report.filters.days}" min="1" max="90"></label>
+      <label style="width:120px">版本<input name="app_version" value="${e(appVersion || "")}" placeholder="全部"></label>
+      <label style="width:130px">渠道<input name="channel" value="${e(channel || "")}" placeholder="全部"></label>
+      <label style="width:130px">授权状态<input name="license_state" value="${e(licenseState || "")}" placeholder="全部"></label>
+      <button>应用筛选</button><a class="btn quiet" href="/admin/telemetry/products">清除</a>
+    </form><div class="actions"><a class="btn" href="/admin/telemetry/reports">使用报表</a><a class="btn" href="/admin/telemetry/events">原始事件</a></div></div>
+    <div class="grid stats">${cards}</div>
+    <h3>决策提示</h3>${decisions.join("") || `<div class="decision">当前没有触发预设风险阈值。仍需结合样本量和版本分布判断。</div>`}
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(420px,1fr))">${renderFunnel(report.funnels.freeModel)}${renderFunnel(report.funnels.import)}${renderFunnel(report.funnels.purchase)}</div>
+    <h3>免费模型三个入口</h3><table><thead><tr><th>入口</th><th>Surface</th><th>点击次数</th><th>点击设备</th><th>后续导入设备</th><th>导入成功设备</th><th>最终转化</th></tr></thead><tbody>${surfaceRows}</tbody></table>
+    <h3>失败和取消</h3><table><thead><tr><th>结果</th><th>事件次数</th><th>设备数</th><th>占漏斗起点</th></tr></thead><tbody>${outcomeRows}</tbody></table>
+    <h3>版本 / 渠道 / 授权状态</h3><table><thead><tr><th>版本</th><th>渠道</th><th>授权</th><th>行为设备</th><th>免费模型</th><th>点击导入</th><th>导入成功</th><th>导入转化</th><th>点击购买</th><th>购买页打开率</th></tr></thead><tbody>${dimensionRows || `<tr><td colspan="10" class="muted">暂无数据</td></tr>`}</tbody></table>
+    <p class="muted">漏斗按同一设备在筛选时间范围内的事件先后顺序计算；百分比使用独立设备数，事件次数单独展示。购买成功需接入支付 Webhook 后才能形成最终成交漏斗。</p>`;
+    return c.html(shell("产品分析", "/admin/telemetry/products", content));
   });
 
   router.get("/telemetry/reports", async (c) => {

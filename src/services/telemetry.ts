@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/index";
 import {
@@ -8,7 +8,7 @@ import {
   telemetrySessionState,
 } from "../db/schema";
 
-const SCHEMA_VERSION = 1;
+const SUPPORTED_SCHEMA_VERSIONS = new Set([1, 2]);
 const MAX_DURATION_SECS = 7 * 24 * 60 * 60;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PRODUCT_RE = /^[a-z0-9_-]{1,64}$/;
@@ -18,8 +18,29 @@ const EVENT_NAMES = new Set([
   "install_seen",
   "session_start",
   "session_heartbeat",
+  "session_checkpoint",
   "session_end",
+  "session_unclean_end",
   "download_click",
+  "native_started",
+  "webview_created",
+  "frontend_mounted",
+  "renderer_created",
+  "model_load_started",
+  "model_loaded",
+  "first_frame_rendered",
+  "startup_failed",
+  "renderer_unresponsive",
+  "webview_process_failed",
+  "model_import_clicked",
+  "model_import_picker_opened",
+  "model_import_completed",
+  "model_import_failed",
+  "model_import_cancelled",
+  "free_model_guide_clicked",
+  "purchase_clicked",
+  "checkout_opened",
+  "purchase_failed",
 ]);
 
 const LICENSE_STATES = new Set([
@@ -29,6 +50,7 @@ const LICENSE_STATES = new Set([
   "expired",
   "invalid",
   "machine_mismatch",
+  "trial",
   "unknown",
 ]);
 
@@ -73,6 +95,44 @@ type MetricDimensions = {
 };
 
 export type TelemetryEventRow = typeof telemetryEvents.$inferSelect;
+
+const PRODUCT_EVENT_NAMES = [
+  "model_import_clicked",
+  "model_import_picker_opened",
+  "model_import_completed",
+  "model_import_failed",
+  "model_import_cancelled",
+  "free_model_guide_clicked",
+  "purchase_clicked",
+  "checkout_opened",
+  "purchase_failed",
+] as const;
+
+type ProductEvent = {
+  event: string;
+  identity: string;
+  occurredAt: number;
+  surface: string;
+  appVersion: string;
+  channel: string;
+  licenseState: string;
+};
+
+type FunnelStageSpec = { key: string; label: string; event: string };
+
+export type ProductFunnel = {
+  key: string;
+  label: string;
+  stages: Array<{
+    key: string;
+    label: string;
+    event: string;
+    devices: number;
+    events: number;
+    fromPreviousPct: number;
+    fromFirstPct: number;
+  }>;
+};
 
 export function parseTelemetryTokens(config: AppConfig): Map<string, string> {
   const map = new Map<string, string>();
@@ -146,7 +206,7 @@ function validateEnvelope(body: unknown): TelemetryEnvelope {
   if (!isObject(body)) throw new TelemetryError("INVALID_JSON", "请求体格式无效", 400);
   const raw = body as Record<string, unknown>;
   const schemaVersion = Number(raw.schema_version);
-  if (schemaVersion !== SCHEMA_VERSION) {
+  if (!SUPPORTED_SCHEMA_VERSIONS.has(schemaVersion)) {
     throw new TelemetryError("INVALID_SCHEMA_VERSION", "schema_version 不受支持", 400);
   }
 
@@ -222,14 +282,22 @@ function validateEventRequirements(
   if (event.startsWith("session_") && !params.sessionId) {
     throw new TelemetryError("INVALID_SESSION_ID", "session_id 不能为空", 400);
   }
-  if (event === "session_heartbeat") {
+  if (event === "session_heartbeat" || event === "session_checkpoint") {
     requirePayloadInteger(params.payload, "seq");
     requirePayloadInteger(params.payload, "process_duration_secs");
-    requirePayloadInteger(params.payload, "overlay_visible_secs");
+    if (event === "session_heartbeat") {
+      requirePayloadInteger(params.payload, "overlay_visible_secs");
+    } else {
+      requirePayloadInteger(params.payload, "companion_visible_secs");
+    }
   }
-  if (event === "session_end") {
+  if (event === "session_end" || event === "session_unclean_end") {
     requirePayloadInteger(params.payload, "process_duration_secs");
-    requirePayloadInteger(params.payload, "overlay_visible_secs");
+    if (event === "session_end") {
+      requirePayloadInteger(params.payload, "overlay_visible_secs");
+    } else {
+      requirePayloadInteger(params.payload, "companion_visible_secs");
+    }
   }
 }
 
@@ -255,7 +323,7 @@ async function updateAggregates(
     if (inserted) installs = 1;
   }
 
-  if (["session_start", "session_heartbeat", "session_end"].includes(envelope.event)) {
+  if (["session_start", "session_heartbeat", "session_checkpoint", "session_end", "session_unclean_end"].includes(envelope.event)) {
     if (envelope.machineHash) {
       await insertDailyUnique(db, dims, "machine_active", envelope.machineHash, receivedAt);
     }
@@ -264,7 +332,7 @@ async function updateAggregates(
     }
   }
 
-  if (envelope.event === "session_heartbeat" || envelope.event === "session_end") {
+  if (["session_heartbeat", "session_checkpoint", "session_end", "session_unclean_end"].includes(envelope.event)) {
     const delta = await updateSessionState(db, envelope, sourceId, receivedAtUnix, receivedAt);
     activeSecs = delta.activeSecs;
     overlayVisibleSecs = delta.overlayVisibleSecs;
@@ -337,16 +405,21 @@ async function updateSessionState(
   if (!envelope.sessionId) return { activeSecs: 0, overlayVisibleSecs: 0 };
 
   const processDuration = safePayloadDuration(envelope.payload, "process_duration_secs");
-  const overlayDuration = safePayloadDuration(envelope.payload, "overlay_visible_secs");
+  const overlayDuration = safePayloadDuration(
+    envelope.payload,
+    envelope.event === "session_checkpoint" || envelope.event === "session_unclean_end"
+      ? "companion_visible_secs"
+      : "overlay_visible_secs"
+  );
   const current = await db
     .select()
     .from(telemetrySessionState)
     .where(eq(telemetrySessionState.sessionId, envelope.sessionId))
     .get();
-  const activeSecs = current ? boundedDelta(processDuration, current.lastProcessDurationSecs) : 0;
+  const activeSecs = current ? boundedDelta(processDuration, current.lastProcessDurationSecs) : processDuration;
   const overlayVisibleSecs = current
     ? boundedDelta(overlayDuration, current.lastOverlayVisibleSecs)
-    : 0;
+    : overlayDuration;
 
   await upsertSessionState(
     db,
@@ -746,6 +819,236 @@ export async function getTelemetryMachineUsage(
     }))
     .sort((a, b) => b.activeSecs - a.activeSecs || b.activeDays - a.activeDays)
     .slice(0, limit);
+}
+
+function percentage(numerator: number, denominator: number): number {
+  if (denominator <= 0) return 0;
+  return Math.round((numerator / denominator) * 1000) / 10;
+}
+
+function productIdentity(row: TelemetryEventRow): string | null {
+  if (row.machineHash) return `machine:${row.machineHash}`;
+  if (row.installId) return `install:${row.installId}`;
+  if (row.sessionId) return `session:${row.sessionId}`;
+  return null;
+}
+
+function parseProductEvent(row: TelemetryEventRow): ProductEvent | null {
+  const identity = productIdentity(row);
+  if (!identity) return null;
+  let payload: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(row.payloadJson);
+    if (isObject(parsed)) payload = parsed;
+  } catch {
+    // A malformed historical payload remains countable with an unknown surface.
+  }
+  const rawSurface = typeof payload.surface === "string" ? payload.surface.trim() : "";
+  return {
+    event: row.event,
+    identity,
+    occurredAt: row.sentAt ?? row.receivedAtUnix,
+    surface: rawSurface || "unknown",
+    appVersion: row.appVersion || "unknown",
+    channel: row.channel || "unknown",
+    licenseState: row.licenseState || "unknown",
+  };
+}
+
+function buildProductFunnel(
+  key: string,
+  label: string,
+  events: ProductEvent[],
+  stages: FunnelStageSpec[],
+): ProductFunnel {
+  const byIdentity = new Map<string, ProductEvent[]>();
+  for (const event of events) {
+    const rows = byIdentity.get(event.identity) || [];
+    rows.push(event);
+    byIdentity.set(event.identity, rows);
+  }
+  for (const rows of byIdentity.values()) {
+    rows.sort((a, b) => a.occurredAt - b.occurredAt);
+  }
+
+  const deviceCounts = stages.map(() => 0);
+  for (const rows of byIdentity.values()) {
+    let earliest = Number.NEGATIVE_INFINITY;
+    for (let index = 0; index < stages.length; index += 1) {
+      const match = rows.find(
+        (row) => row.event === stages[index].event && row.occurredAt >= earliest,
+      );
+      if (!match) break;
+      deviceCounts[index] += 1;
+      earliest = match.occurredAt;
+    }
+  }
+
+  const first = deviceCounts[0] || 0;
+  return {
+    key,
+    label,
+    stages: stages.map((stage, index) => ({
+      ...stage,
+      devices: deviceCounts[index],
+      events: events.filter((event) => event.event === stage.event).length,
+      fromPreviousPct: percentage(deviceCounts[index], index === 0 ? first : deviceCounts[index - 1]),
+      fromFirstPct: percentage(deviceCounts[index], first),
+    })),
+  };
+}
+
+function eventSummary(events: ProductEvent[], eventName: string) {
+  const matching = events.filter((event) => event.event === eventName);
+  return {
+    event: eventName,
+    events: matching.length,
+    devices: new Set(matching.map((event) => event.identity)).size,
+  };
+}
+
+export async function getProductAnalyticsReport(
+  db: Database,
+  params: {
+    days?: number;
+    productId?: string;
+    appVersion?: string;
+    channel?: string;
+    licenseState?: string;
+  } = {},
+) {
+  const days = Math.min(90, Math.max(1, params.days || 14));
+  const productId = params.productId || "animate";
+  const start = new Date(Date.now() - (days - 1) * 86400000).toISOString().slice(0, 10);
+  const conditions = [
+    gte(telemetryEvents.receivedAt, `${start} 00:00:00`),
+    eq(telemetryEvents.productId, productId),
+    inArray(telemetryEvents.event, [...PRODUCT_EVENT_NAMES]),
+  ];
+  if (params.appVersion) conditions.push(eq(telemetryEvents.appVersion, params.appVersion));
+  if (params.channel) conditions.push(eq(telemetryEvents.channel, params.channel));
+  if (params.licenseState) conditions.push(eq(telemetryEvents.licenseState, params.licenseState));
+
+  const rows = await db
+    .select()
+    .from(telemetryEvents)
+    .where(and(...conditions))
+    .orderBy(telemetryEvents.receivedAt)
+    .all();
+  const events = rows.map(parseProductEvent).filter((event): event is ProductEvent => !!event);
+
+  const importStages: FunnelStageSpec[] = [
+    { key: "clicked", label: "点击导入", event: "model_import_clicked" },
+    { key: "picker", label: "打开文件选择器", event: "model_import_picker_opened" },
+    { key: "completed", label: "导入成功", event: "model_import_completed" },
+  ];
+  const purchaseStages: FunnelStageSpec[] = [
+    { key: "clicked", label: "点击购买", event: "purchase_clicked" },
+    { key: "checkout", label: "打开购买页面", event: "checkout_opened" },
+  ];
+  const freeModelStages: FunnelStageSpec[] = [
+    { key: "guide", label: "点击获取免费模型", event: "free_model_guide_clicked" },
+    { key: "import", label: "后续点击导入", event: "model_import_clicked" },
+    { key: "completed", label: "导入成功", event: "model_import_completed" },
+  ];
+
+  const freeModelSurfaces = [
+    ["workshop_model_card", "模型列表卡片"],
+    ["license_prompt", "激活/购买提示"],
+    ["import_dialog", "添加萌灵对话框"],
+  ] as const;
+  const surfaceFunnels = freeModelSurfaces.map(([surface, label]) => {
+    const guideIdentities = new Set(
+      events
+        .filter((event) => event.event === "free_model_guide_clicked" && event.surface === surface)
+        .map((event) => event.identity),
+    );
+    const scoped = events.filter(
+      (event) => event.event !== "free_model_guide_clicked" || event.surface === surface,
+    ).filter((event) => guideIdentities.has(event.identity));
+    return {
+      surface,
+      label,
+      funnel: buildProductFunnel(surface, label, scoped, freeModelStages),
+    };
+  });
+
+  const importFunnel = buildProductFunnel("model_import", "模型导入", events, importStages);
+  const purchaseFunnel = buildProductFunnel("purchase", "购买入口", events, purchaseStages);
+  const freeModelFunnel = buildProductFunnel("free_model", "免费模型到导入", events, freeModelStages);
+  const importClicked = importFunnel.stages[0]?.devices || 0;
+  const purchaseClicked = purchaseFunnel.stages[0]?.devices || 0;
+  const failedImports = eventSummary(events, "model_import_failed");
+  const cancelledImports = eventSummary(events, "model_import_cancelled");
+  const purchaseFailures = eventSummary(events, "purchase_failed");
+
+  const dimensionMap = new Map<string, {
+    appVersion: string;
+    channel: string;
+    licenseState: string;
+    identities: Set<string>;
+    freeModelDevices: Set<string>;
+    events: ProductEvent[];
+  }>();
+  for (const event of events) {
+    const dimensionKey = `${event.appVersion}\u0000${event.channel}\u0000${event.licenseState}`;
+    const dimension = dimensionMap.get(dimensionKey) || {
+      appVersion: event.appVersion,
+      channel: event.channel,
+      licenseState: event.licenseState,
+      identities: new Set<string>(),
+      freeModelDevices: new Set<string>(),
+      events: [],
+    };
+    dimension.events.push(event);
+    dimension.identities.add(event.identity);
+    if (event.event === "free_model_guide_clicked") dimension.freeModelDevices.add(event.identity);
+    dimensionMap.set(dimensionKey, dimension);
+  }
+
+  const available = {
+    appVersions: Array.from(new Set(rows.map((row) => row.appVersion || "unknown"))).sort(),
+    channels: Array.from(new Set(rows.map((row) => row.channel || "unknown"))).sort(),
+    licenseStates: Array.from(new Set(rows.map((row) => row.licenseState || "unknown"))).sort(),
+  };
+
+  return {
+    filters: { days, productId, appVersion: params.appVersion, channel: params.channel, licenseState: params.licenseState },
+    totals: {
+      events: events.length,
+      devices: new Set(events.map((event) => event.identity)).size,
+      importFailureRatePct: percentage(failedImports.devices, importClicked),
+      importCancelRatePct: percentage(cancelledImports.devices, importClicked),
+      checkoutFailureRatePct: percentage(purchaseFailures.devices, purchaseClicked),
+    },
+    funnels: { import: importFunnel, freeModel: freeModelFunnel, purchase: purchaseFunnel },
+    outcomes: { failedImports, cancelledImports, purchaseFailures },
+    freeModelSurfaces: surfaceFunnels,
+    dimensions: Array.from(dimensionMap.values())
+      .map((dimension) => {
+        const dimensionImport = buildProductFunnel("dimension_import", "模型导入", dimension.events, importStages);
+        const dimensionPurchase = buildProductFunnel("dimension_purchase", "购买入口", dimension.events, purchaseStages);
+        const importDevices = dimensionImport.stages[0]?.devices || 0;
+        const importCompletedDevices = dimensionImport.stages.at(-1)?.devices || 0;
+        const purchaseDevices = dimensionPurchase.stages[0]?.devices || 0;
+        const checkoutDevices = dimensionPurchase.stages.at(-1)?.devices || 0;
+        return {
+          appVersion: dimension.appVersion,
+          channel: dimension.channel,
+          licenseState: dimension.licenseState,
+          devices: dimension.identities.size,
+          freeModelDevices: dimension.freeModelDevices.size,
+          importDevices,
+          importCompletedDevices,
+          importConversionPct: percentage(importCompletedDevices, importDevices),
+          purchaseDevices,
+          checkoutDevices,
+          checkoutOpenPct: percentage(checkoutDevices, purchaseDevices),
+        };
+      })
+      .sort((a, b) => b.devices - a.devices),
+    available,
+  };
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
