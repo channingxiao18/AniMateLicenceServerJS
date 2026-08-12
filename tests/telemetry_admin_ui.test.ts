@@ -13,10 +13,10 @@ describe("telemetry admin reports", () => {
     const headers = { cookie: `${SESSION_COOKIE}=${session}` };
 
     const cases = [
-      ["/admin/telemetry/installs?days=7", ["每日新增安装", "7天", "按日安装数量"]],
+      ["/admin/telemetry/installs?days=7", ["每日新增安装", "7天", "获取免费模型", "上传模型成功", "去购买"]],
       ["/admin/telemetry/activity?days=14", ["每日活跃设备", "14天", "总活跃时长"]],
       ["/admin/telemetry/retention?days=30", ["安装设备留存", "Cohort 留存矩阵", "D14"]],
-      ["/admin/telemetry/installs/2026-08-12", ["新增设备", "安装设备 ID", "上一页"]],
+      ["/admin/telemetry/installs/2026-08-12", ["新增用户", "安装用户 ID", "获取免费模型", "上传模型成功", "去购买"]],
       ["/admin/telemetry/activity/2026-08-12", ["活跃设备", "活跃时长", "下一页"]],
     ] as const;
 

@@ -845,16 +845,38 @@ export async function getInstallationDays(
   const productId = params.productId || "animate";
   const start = daysAgo(days - 1);
   const installations = await loadInstallations(db, productId);
-  const byDay = new Map<string, number>();
+  const relevantInstallations = installations.filter((row) => row.firstInstalledDay >= start);
+  const actions = await loadNewInstallationActions(db, productId, start, daysAgo(0), relevantInstallations);
+  const byDay = new Map<string, { installs: number; freeModelUsers: number; modelUploadUsers: number; purchaseUsers: number }>();
   for (const row of installations) {
-    if (row.firstInstalledDay >= start) byDay.set(row.firstInstalledDay, (byDay.get(row.firstInstalledDay) || 0) + 1);
+    if (row.firstInstalledDay < start) continue;
+    const summary = byDay.get(row.firstInstalledDay) || {
+      installs: 0,
+      freeModelUsers: 0,
+      modelUploadUsers: 0,
+      purchaseUsers: 0,
+    };
+    const action = actions.get(row.installId);
+    summary.installs += 1;
+    if (action?.freeModelClicked) summary.freeModelUsers += 1;
+    if (action?.modelUploadSucceeded) summary.modelUploadUsers += 1;
+    if (action?.purchaseClicked) summary.purchaseUsers += 1;
+    byDay.set(row.firstInstalledDay, summary);
   }
   return {
     filters: { days, productId },
-    total: Array.from(byDay.values()).reduce((total, value) => total + value, 0),
+    total: Array.from(byDay.values()).reduce((total, value) => total + value.installs, 0),
     days: Array.from({ length: days }, (_, index) => {
       const day = daysAgo(index);
-      return { day, installs: byDay.get(day) || 0 };
+      return {
+        day,
+        ...(byDay.get(day) || {
+          installs: 0,
+          freeModelUsers: 0,
+          modelUploadUsers: 0,
+          purchaseUsers: 0,
+        }),
+      };
     }),
   };
 }
@@ -869,8 +891,12 @@ export async function listInstallationsForDay(
   const all = (await loadInstallations(db, productId))
     .filter((row) => row.firstInstalledDay === params.day)
     .sort((a, b) => b.firstInstalledAt.localeCompare(a.firstInstalledAt));
+  const actions = await loadNewInstallationActions(db, productId, params.day, params.day, all);
   return {
-    items: all.slice((page - 1) * pageSize, page * pageSize),
+    items: all.slice((page - 1) * pageSize, page * pageSize).map((row) => ({
+      ...row,
+      ...(actions.get(row.installId) || emptyNewInstallationActions()),
+    })),
     total: all.length,
     page,
     pageSize,
@@ -889,6 +915,54 @@ type InstallationReportRow = {
   firstInstalledDay: string;
   firstInstalledAt: string;
 };
+
+type NewInstallationActions = {
+  freeModelClicked: boolean;
+  modelUploadSucceeded: boolean;
+  purchaseClicked: boolean;
+};
+
+const NEW_INSTALLATION_ACTION_EVENTS = [
+  "free_model_guide_clicked",
+  "model_import_completed",
+  "purchase_clicked",
+] as const;
+
+function emptyNewInstallationActions(): NewInstallationActions {
+  return {
+    freeModelClicked: false,
+    modelUploadSucceeded: false,
+    purchaseClicked: false,
+  };
+}
+
+async function loadNewInstallationActions(
+  db: Database,
+  productId: string,
+  start: string,
+  end: string,
+  installations: InstallationReportRow[]
+): Promise<Map<string, NewInstallationActions>> {
+  const installationDayById = new Map(installations.map((row) => [row.installId, row.firstInstalledDay]));
+  if (!installationDayById.size) return new Map();
+
+  const events = await db.select().from(telemetryEvents).where(and(
+    eq(telemetryEvents.productId, productId),
+    inArray(telemetryEvents.event, [...NEW_INSTALLATION_ACTION_EVENTS]),
+    gte(telemetryEvents.receivedAt, `${start} 00:00:00`),
+    lte(telemetryEvents.receivedAt, `${end} 23:59:59`)
+  )).all();
+  const actionsByInstall = new Map<string, NewInstallationActions>();
+  for (const event of events) {
+    if (!event.installId || installationDayById.get(event.installId) !== event.receivedAt.slice(0, 10)) continue;
+    const actions = actionsByInstall.get(event.installId) || emptyNewInstallationActions();
+    if (event.event === "free_model_guide_clicked") actions.freeModelClicked = true;
+    if (event.event === "model_import_completed") actions.modelUploadSucceeded = true;
+    if (event.event === "purchase_clicked") actions.purchaseClicked = true;
+    actionsByInstall.set(event.installId, actions);
+  }
+  return actionsByInstall;
+}
 
 async function loadInstallations(db: Database, productId: string): Promise<InstallationReportRow[]> {
   const events = await db.select().from(telemetryEvents).where(and(

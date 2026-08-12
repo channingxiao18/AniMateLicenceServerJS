@@ -294,6 +294,34 @@ describe("telemetry", () => {
     }, today);
     await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
       ...base,
+      event_id: "71717171-7171-4171-8171-717171717171",
+      event: "free_model_guide_clicked",
+      session_id: undefined,
+      payload: { surface: "workshop_model_card" },
+    }, cohortDate);
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "72727272-7272-4272-8272-727272727272",
+      event: "free_model_guide_clicked",
+      session_id: undefined,
+      payload: { surface: "import_dialog" },
+    }, new Date(cohortDate.getTime() + 60000));
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "73737373-7373-4373-8373-737373737373",
+      event: "model_import_completed",
+      session_id: undefined,
+      payload: { result: "success" },
+    }, new Date(cohortDate.getTime() + 120000));
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "74747474-7474-4474-8474-747474747474",
+      event: "purchase_clicked",
+      session_id: undefined,
+      payload: { surface: "license_dialog" },
+    }, dayOneDate);
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
       event_id: "30303030-3030-4030-8030-303030303030",
       event: "session_start",
       session_id: sessionId,
@@ -324,10 +352,20 @@ describe("telemetry", () => {
     const cohortDay = cohortDate.toISOString().slice(0, 10);
     const dayOne = dayOneDate.toISOString().slice(0, 10);
     const installationReport = await getInstallationDays(env.db, { days: 7, productId: "animate" });
-    expect(installationReport.days.find((row) => row.day === cohortDay)?.installs).toBe(1);
+    expect(installationReport.days.find((row) => row.day === cohortDay)).toMatchObject({
+      installs: 1,
+      freeModelUsers: 1,
+      modelUploadUsers: 1,
+      purchaseUsers: 0,
+    });
     const installations = await listInstallationsForDay(env.db, { day: cohortDay, page: 1, pageSize: 1 });
     expect(installations).toMatchObject({ total: 1, page: 1, pageSize: 1 });
-    expect(installations.items[0].installId).toBe(installId);
+    expect(installations.items[0]).toMatchObject({
+      installId,
+      freeModelClicked: true,
+      modelUploadSucceeded: true,
+      purchaseClicked: false,
+    });
 
     const activityReport = await getActivityDays(env.db, { days: 7, productId: "animate" });
     expect(activityReport.days.find((row) => row.day === dayOne)).toMatchObject({ devices: 1, activeSecs: 900 });
