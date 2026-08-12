@@ -821,15 +821,291 @@ export async function getTelemetryMachineUsage(
     .slice(0, limit);
 }
 
+function reportDays(value: number | undefined, fallback = 30): number {
+  return Math.min(90, Math.max(1, Number.isFinite(value) ? Math.floor(value!) : fallback));
+}
+
+function dayString(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function daysAgo(days: number): string {
+  return dayString(new Date(Date.now() - days * 86400000));
+}
+
+function addUtcDays(day: string, days: number): string {
+  return dayString(new Date(new Date(`${day}T00:00:00Z`).getTime() + days * 86400000));
+}
+
+export async function getInstallationDays(
+  db: Database,
+  params: { days?: number; productId?: string } = {}
+) {
+  const days = reportDays(params.days);
+  const productId = params.productId || "animate";
+  const start = daysAgo(days - 1);
+  const installations = await loadInstallations(db, productId);
+  const byDay = new Map<string, number>();
+  for (const row of installations) {
+    if (row.firstInstalledDay >= start) byDay.set(row.firstInstalledDay, (byDay.get(row.firstInstalledDay) || 0) + 1);
+  }
+  return {
+    filters: { days, productId },
+    total: Array.from(byDay.values()).reduce((total, value) => total + value, 0),
+    days: Array.from({ length: days }, (_, index) => {
+      const day = daysAgo(index);
+      return { day, installs: byDay.get(day) || 0 };
+    }),
+  };
+}
+
+export async function listInstallationsForDay(
+  db: Database,
+  params: { day: string; productId?: string; page?: number; pageSize?: number }
+) {
+  const productId = params.productId || "animate";
+  const page = Math.max(1, Math.floor(params.page || 1));
+  const pageSize = Math.min(100, Math.max(1, Math.floor(params.pageSize || 25)));
+  const all = (await loadInstallations(db, productId))
+    .filter((row) => row.firstInstalledDay === params.day)
+    .sort((a, b) => b.firstInstalledAt.localeCompare(a.firstInstalledAt));
+  return {
+    items: all.slice((page - 1) * pageSize, page * pageSize),
+    total: all.length,
+    page,
+    pageSize,
+  };
+}
+
+type InstallationReportRow = {
+  productId: string;
+  installId: string;
+  machineHash: string | null;
+  sourceId: string;
+  platform: string;
+  channel: string;
+  appVersion: string;
+  licenseState: string;
+  firstInstalledDay: string;
+  firstInstalledAt: string;
+};
+
+async function loadInstallations(db: Database, productId: string): Promise<InstallationReportRow[]> {
+  const events = await db.select().from(telemetryEvents).where(and(
+    eq(telemetryEvents.productId, productId),
+    eq(telemetryEvents.event, "install_seen")
+  )).orderBy(telemetryEvents.receivedAt).all();
+  const firstByInstall = new Map<string, InstallationReportRow>();
+  for (const event of events) {
+    if (!event.installId || firstByInstall.has(event.installId)) continue;
+    firstByInstall.set(event.installId, {
+      productId: event.productId,
+      installId: event.installId,
+      machineHash: event.machineHash,
+      sourceId: event.sourceId,
+      platform: event.platform || "unknown",
+      channel: event.channel || "official",
+      appVersion: event.appVersion || "unknown",
+      licenseState: event.licenseState || "unknown",
+      firstInstalledDay: event.receivedAt.slice(0, 10),
+      firstInstalledAt: event.receivedAt,
+    });
+  }
+  return Array.from(firstByInstall.values());
+}
+
+export async function getActivityDays(
+  db: Database,
+  params: { days?: number; productId?: string } = {}
+) {
+  const days = reportDays(params.days);
+  const productId = params.productId || "animate";
+  const start = daysAgo(days - 1);
+  const activity = await loadDailyDeviceActivity(db, productId, start, daysAgo(0));
+  const byDay = new Map<string, { devices: number; activeSecs: number; launches: number }>();
+  for (const row of activity) {
+    const summary = byDay.get(row.day) || { devices: 0, activeSecs: 0, launches: 0 };
+    summary.devices += 1;
+    summary.activeSecs += row.activeSecs;
+    summary.launches += row.launches;
+    byDay.set(row.day, summary);
+  }
+  return {
+    filters: { days, productId },
+    days: Array.from({ length: days }, (_, index) => {
+      const day = daysAgo(index);
+      const row = byDay.get(day);
+      const devices = Number(row?.devices || 0);
+      const activeSecs = Number(row?.activeSecs || 0);
+      return {
+        day,
+        devices,
+        activeSecs,
+        launches: row?.launches || 0,
+        averageActiveSecs: devices ? Math.round(activeSecs / devices) : 0,
+      };
+    }),
+  };
+}
+
+export async function listActiveDevicesForDay(
+  db: Database,
+  params: { day: string; productId?: string; page?: number; pageSize?: number }
+) {
+  const productId = params.productId || "animate";
+  const page = Math.max(1, Math.floor(params.page || 1));
+  const pageSize = Math.min(100, Math.max(1, Math.floor(params.pageSize || 25)));
+  const all = (await loadDailyDeviceActivity(db, productId, params.day, params.day))
+    .sort((a, b) => b.activeSecs - a.activeSecs || b.lastActiveAt.localeCompare(a.lastActiveAt));
+  return {
+    items: all.slice((page - 1) * pageSize, page * pageSize),
+    total: all.length,
+    page,
+    pageSize,
+  };
+}
+
+type DailyDeviceActivity = {
+  day: string;
+  productId: string;
+  installId: string;
+  machineHash: string | null;
+  sourceId: string;
+  platform: string;
+  channel: string;
+  appVersion: string;
+  licenseState: string;
+  launches: number;
+  sessions: number;
+  activeSecs: number;
+  overlayVisibleSecs: number;
+  firstActiveAt: string;
+  lastActiveAt: string;
+};
+
+async function loadDailyDeviceActivity(
+  db: Database,
+  productId: string,
+  start: string,
+  end: string
+): Promise<DailyDeviceActivity[]> {
+  const sessionEvents = ["session_start", "session_heartbeat", "session_checkpoint", "session_end", "session_unclean_end"];
+  const events = await db.select().from(telemetryEvents).where(and(
+    eq(telemetryEvents.productId, productId),
+    inArray(telemetryEvents.event, sessionEvents),
+    gte(telemetryEvents.receivedAt, `${start} 00:00:00`),
+    lte(telemetryEvents.receivedAt, `${end} 23:59:59`)
+  )).orderBy(telemetryEvents.receivedAt).all();
+  const rows = new Map<string, DailyDeviceActivity>();
+  const sessionDurations = new Map<string, { process: number; visible: number }>();
+  for (const event of events) {
+    if (!event.installId) continue;
+    const day = event.receivedAt.slice(0, 10);
+    const key = `${day}\u0000${event.installId}`;
+    const row = rows.get(key) || {
+      day,
+      productId: event.productId,
+      installId: event.installId,
+      machineHash: event.machineHash,
+      sourceId: event.sourceId,
+      platform: event.platform || "unknown",
+      channel: event.channel || "official",
+      appVersion: event.appVersion || "unknown",
+      licenseState: event.licenseState || "unknown",
+      launches: 0,
+      sessions: 0,
+      activeSecs: 0,
+      overlayVisibleSecs: 0,
+      firstActiveAt: event.receivedAt,
+      lastActiveAt: event.receivedAt,
+    };
+    row.machineHash = event.machineHash || row.machineHash;
+    row.sourceId = event.sourceId;
+    row.platform = event.platform || row.platform;
+    row.channel = event.channel || row.channel;
+    row.appVersion = event.appVersion || row.appVersion;
+    row.licenseState = event.licenseState || row.licenseState;
+    row.lastActiveAt = event.receivedAt;
+    if (event.event === "session_start") {
+      row.launches += 1;
+      row.sessions += 1;
+    }
+    if (event.sessionId && event.event !== "session_start") {
+      let payload: Record<string, unknown> = {};
+      try { payload = JSON.parse(event.payloadJson); } catch { /* Ignore malformed history. */ }
+      const process = safePayloadDuration(payload, "process_duration_secs");
+      const visibleKey = event.event === "session_checkpoint" || event.event === "session_unclean_end"
+        ? "companion_visible_secs"
+        : "overlay_visible_secs";
+      const visible = safePayloadDuration(payload, visibleKey);
+      const previous = sessionDurations.get(event.sessionId) || { process: 0, visible: 0 };
+      row.activeSecs += boundedDelta(process, previous.process);
+      row.overlayVisibleSecs += boundedDelta(visible, previous.visible);
+      sessionDurations.set(event.sessionId, { process, visible });
+    }
+    rows.set(key, row);
+  }
+  return Array.from(rows.values());
+}
+
+export async function getRetentionReport(
+  db: Database,
+  params: { days?: number; productId?: string } = {}
+) {
+  const allowedDays = [7, 14, 30];
+  const requested = Math.floor(params.days || 30);
+  const days = allowedDays.includes(requested) ? requested : 30;
+  const productId = params.productId || "animate";
+  const start = daysAgo(days - 1);
+  const today = daysAgo(0);
+  const [installationRows, activity] = await Promise.all([
+    loadInstallations(db, productId),
+    loadDailyDeviceActivity(db, productId, start, today),
+  ]);
+  const installations = installationRows
+    .filter((row) => row.firstInstalledDay >= start && row.firstInstalledDay <= today)
+    .map((row) => ({ installId: row.installId, cohortDay: row.firstInstalledDay }));
+  const activityKeys = new Set(activity.map((row) => `${row.installId}\u0000${row.day}`));
+  const offsets = [1, 3, 7, 14].filter((offset) => offset < days);
+  const cohorts = new Map<string, string[]>();
+  for (const install of installations) {
+    const values = cohorts.get(install.cohortDay) || [];
+    values.push(install.installId);
+    cohorts.set(install.cohortDay, values);
+  }
+  const rows = Array.from({ length: days }, (_, index) => {
+    const cohortDay = daysAgo(index);
+    const ids = cohorts.get(cohortDay) || [];
+    return {
+      cohortDay,
+      installs: ids.length,
+      retention: Object.fromEntries(offsets.map((offset) => {
+        const targetDay = addUtcDays(cohortDay, offset);
+        if (targetDay > today) return [offset, null];
+        const retained = ids.filter((id) => activityKeys.has(`${id}\u0000${targetDay}`)).length;
+        return [offset, {
+          devices: retained,
+          ratePct: ids.length ? Math.round((retained / ids.length) * 1000) / 10 : 0,
+        }];
+      })),
+    };
+  });
+  const summary = Object.fromEntries(offsets.map((offset) => {
+    const mature = rows.filter((row) => row.retention[offset] !== null);
+    const denominator = mature.reduce((total, row) => total + row.installs, 0);
+    const numerator = mature.reduce((total, row) => total + (row.retention[offset]?.devices || 0), 0);
+    return [offset, { devices: numerator, cohortDevices: denominator, ratePct: percentage(numerator, denominator) }];
+  }));
+  return { filters: { days, productId }, offsets, rows, summary };
+}
+
 function percentage(numerator: number, denominator: number): number {
   if (denominator <= 0) return 0;
   return Math.round((numerator / denominator) * 1000) / 10;
 }
 
 function productIdentity(row: TelemetryEventRow): string | null {
-  if (row.machineHash) return `machine:${row.machineHash}`;
   if (row.installId) return `install:${row.installId}`;
-  if (row.sessionId) return `session:${row.sessionId}`;
   return null;
 }
 

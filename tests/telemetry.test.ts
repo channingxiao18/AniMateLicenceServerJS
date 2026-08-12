@@ -2,8 +2,13 @@ import { describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestEnv } from "./helpers/setup";
 import {
+  getActivityDays,
+  getInstallationDays,
   getProductAnalyticsReport,
+  getRetentionReport,
   getTelemetryReport,
+  listActiveDevicesForDay,
+  listInstallationsForDay,
   recordTelemetryEvent,
   TelemetryError,
 } from "../src/services/telemetry";
@@ -261,5 +266,77 @@ describe("telemetry", () => {
     expect(report.funnels.freeModel.stages.map((stage) => stage.devices)).toEqual([1, 1, 1]);
     expect(report.freeModelSurfaces.find((surface) => surface.surface === "import_dialog")?.funnel.stages[2].devices).toBe(1);
     expect(report.funnels.import.stages[2].fromFirstPct).toBe(100);
+  });
+
+  it("reports installation, activity detail and retention by install_id", async () => {
+    const env = await createTestEnv();
+    const today = new Date();
+    today.setUTCHours(12, 0, 0, 0);
+    const cohortDate = new Date(today.getTime() - 3 * 86400000);
+    const dayOneDate = new Date(today.getTime() - 2 * 86400000);
+    const installId = "12121212-1212-4212-8212-121212121212";
+    const sessionId = "34343434-3434-4434-8434-343434343434";
+    const base = event({ install_id: installId, machine_hash: machineHash });
+
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "10101010-1010-4010-8010-101010101010",
+      event: "install_seen",
+      session_id: undefined,
+      payload: { first_seen: true },
+    }, cohortDate);
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "20202020-2020-4020-8020-202020202020",
+      event: "install_seen",
+      session_id: undefined,
+      payload: { first_seen: true },
+    }, today);
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "30303030-3030-4030-8030-303030303030",
+      event: "session_start",
+      session_id: sessionId,
+      payload: { started_at: Math.floor(dayOneDate.getTime() / 1000) },
+    }, dayOneDate);
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "40404040-4040-4040-8040-404040404040",
+      event: "session_checkpoint",
+      session_id: sessionId,
+      payload: { seq: 1, process_duration_secs: 600, companion_visible_secs: 360 },
+    }, new Date(dayOneDate.getTime() + 600000));
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "50505050-5050-4050-8050-505050505050",
+      event: "session_checkpoint",
+      session_id: sessionId,
+      payload: { seq: 2, process_duration_secs: 900, companion_visible_secs: 480 },
+    }, new Date(dayOneDate.getTime() + 900000));
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "60606060-6060-4060-8060-606060606060",
+      event: "session_start",
+      session_id: "56565656-5656-4656-8656-565656565656",
+      payload: { started_at: Math.floor(today.getTime() / 1000) },
+    }, today);
+
+    const cohortDay = cohortDate.toISOString().slice(0, 10);
+    const dayOne = dayOneDate.toISOString().slice(0, 10);
+    const installationReport = await getInstallationDays(env.db, { days: 7, productId: "animate" });
+    expect(installationReport.days.find((row) => row.day === cohortDay)?.installs).toBe(1);
+    const installations = await listInstallationsForDay(env.db, { day: cohortDay, page: 1, pageSize: 1 });
+    expect(installations).toMatchObject({ total: 1, page: 1, pageSize: 1 });
+    expect(installations.items[0].installId).toBe(installId);
+
+    const activityReport = await getActivityDays(env.db, { days: 7, productId: "animate" });
+    expect(activityReport.days.find((row) => row.day === dayOne)).toMatchObject({ devices: 1, activeSecs: 900 });
+    const activeDevices = await listActiveDevicesForDay(env.db, { day: dayOne, page: 1, pageSize: 1 });
+    expect(activeDevices.items[0]).toMatchObject({ installId, activeSecs: 900, overlayVisibleSecs: 480 });
+
+    const retention = await getRetentionReport(env.db, { days: 7, productId: "animate" });
+    const cohort = retention.rows.find((row) => row.cohortDay === cohortDay);
+    expect(cohort?.retention[1]).toMatchObject({ devices: 1, ratePct: 100 });
+    expect(cohort?.retention[3]).toMatchObject({ devices: 1, ratePct: 100 });
   });
 });

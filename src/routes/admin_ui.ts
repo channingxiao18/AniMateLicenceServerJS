@@ -22,9 +22,14 @@ import {
 import { formatPlanFeatures } from "../services/plan_features";
 import { listTrialGrants } from "../services/trial";
 import {
+  getActivityDays,
+  getInstallationDays,
   getProductAnalyticsReport,
   getTelemetryMachineUsage,
   getTelemetryReport,
+  getRetentionReport,
+  listActiveDevicesForDay,
+  listInstallationsForDay,
   listTelemetryEvents,
   type ProductFunnel,
 } from "../services/telemetry";
@@ -83,9 +88,12 @@ const navItems = [
   ["/admin/entitlements", "授权权益"],
   ["/admin/subscriptions", "订阅"],
   ["/admin/providers", "支付映射"],
-  ["/admin/telemetry/reports", "统计报表"],
-  ["/admin/telemetry/products", "产品分析"],
-  ["/admin/telemetry/events", "统计事件"],
+  ["/admin/telemetry/installs", "新增安装"],
+  ["/admin/telemetry/activity", "活跃设备"],
+  ["/admin/telemetry/retention", "留存分析"],
+  ["/admin/telemetry/usage", "设备总览"],
+  ["/admin/telemetry/products", "行为漏斗"],
+  ["/admin/telemetry/events", "原始事件"],
   ["/admin/logs", "日志"],
 ];
 
@@ -120,6 +128,7 @@ input,select,textarea{border:1px solid #cfd6e1;border-radius:6px;padding:8px 9px
 .inline-form{display:flex;gap:7px;align-items:center}.inline-form input{min-width:150px}
 .funnel{display:grid;gap:10px}.funnel-stage{display:grid;grid-template-columns:minmax(120px,1fr) minmax(180px,3fr) 90px 90px;gap:10px;align-items:center}
 .funnel-bar{height:28px;background:#edf1f6;border-radius:5px;overflow:hidden}.funnel-fill{height:100%;min-width:2px;background:#1e66d0}.funnel-value{font-weight:700}.decision{border-left:4px solid #1e66d0;padding:10px 12px;background:#f3f7fd;margin:8px 0}.decision.warn{border-left-color:#d58a00;background:#fff8e8;color:#6f4b00}.decision.bad{border-left-color:#d64848;background:#fff0f0;color:#8e2929}
+.report-shell{display:grid;gap:18px}.report-tabs{display:flex;align-items:center;gap:4px;border-bottom:1px solid #dfe4eb;overflow-x:auto}.report-tabs a{padding:10px 13px;color:#657184;text-decoration:none;font-size:13px;white-space:nowrap;border-bottom:2px solid transparent}.report-tabs a.active{color:#1768b0;border-bottom-color:#1768b0;font-weight:650}.report-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}.report-head h2{margin:0 0 5px;font-size:21px}.report-head p{margin:0}.range-switch{display:flex;padding:3px;background:#e9edf2;border-radius:7px}.range-switch a{min-width:48px;padding:6px 10px;text-align:center;text-decoration:none;color:#596577;font-size:13px;border-radius:5px}.range-switch a.active{background:#fff;color:#172033;box-shadow:0 1px 3px rgba(20,30,48,.12);font-weight:650}.metric-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));border:1px solid #e1e6ec;background:#fff;border-radius:8px}.metric{padding:16px 18px;border-right:1px solid #edf0f4}.metric:last-child{border-right:0}.metric-label{color:#687386;font-size:12px}.metric-value{font-size:25px;font-weight:720;margin-top:4px}.report-section{background:#fff;border:1px solid #e1e6ec;border-radius:8px;overflow:auto}.section-head{padding:15px 17px;border-bottom:1px solid #e7ebf0;display:flex;align-items:center;justify-content:space-between;gap:10px}.section-head h3{margin:0;font-size:15px}.section-head span{font-size:12px;color:#768195}.report-section table{border:0;border-radius:0;min-width:620px}.click-row{cursor:pointer}.click-row:hover td{background:#f5f8fb}.day-link{color:#1768b0;text-decoration:none;font-weight:650}.number-cell{font-variant-numeric:tabular-nums;font-weight:650}.pagination{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-top:1px solid #e7ebf0}.pagination-links{display:flex;gap:6px}.pagination .disabled{opacity:.45;pointer-events:none}.duration{font-variant-numeric:tabular-nums}.retention-wrap{overflow:auto}.retention-table{min-width:720px}.retention-cell{font-variant-numeric:tabular-nums}.retention-cell b{display:block}.heat-0{background:#fafbfc}.heat-1{background:#eaf5ef}.heat-2{background:#cfe9da}.heat-3{background:#9fd0b3}.heat-4{background:#55a978;color:#fff}.empty-cell{color:#aab1bc;background:#fafbfc}.identity{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
 @media(max-width:800px){.app{grid-template-columns:1fr}.side{position:static;height:auto}.logout{position:static}.head{padding:0 16px}.wrap{padding:16px}}
 </style></head><body><div class="app"><aside class="side"><div class="brand">授权平台</div>${nav}<a class="logout" href="/admin/logout">退出</a></aside><section class="main"><header class="head"><h1>${e(title)}</h1><span class="muted">Admin</span></header><main class="wrap">${content}</main></section></div></body></html>`;
 }
@@ -144,10 +153,52 @@ function modal(id: string, title: string, action: string, fields: string, submit
   return `<div id="${e(id)}" class="modal"><a class="modal-bg" href="#"></a><div class="modal-card"><div class="modal-head"><h2>${e(title)}</h2></div><div class="modal-body"><form class="modal-form" method="post" action="${e(action)}">${fields}<div class="modal-actions"><a class="btn" href="#">取消</a><button class="primary">${e(submitLabel)}</button></div></form></div></div></div>`;
 }
 
-function formatHours(seconds: number): string {
-  if (!seconds) return "0h";
-  const hours = seconds / 3600;
-  return `${hours >= 10 ? hours.toFixed(0) : hours.toFixed(1)}h`;
+function formatDeviceDuration(seconds: number): string {
+  const value = Math.max(0, Math.round(seconds || 0));
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
+  const secs = value % 60;
+  if (hours) return `${hours}时 ${minutes}分`;
+  if (minutes) return `${minutes}分 ${secs}秒`;
+  return `${secs}秒`;
+}
+
+function validReportDay(value: string | undefined): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value || "") ? value! : new Date().toISOString().slice(0, 10);
+}
+
+function reportTabs(active: string): string {
+  const tabs = [
+    ["/admin/telemetry/installs", "新增安装"],
+    ["/admin/telemetry/activity", "活跃设备"],
+    ["/admin/telemetry/retention", "留存分析"],
+    ["/admin/telemetry/usage", "设备总览"],
+    ["/admin/telemetry/products", "行为漏斗"],
+    ["/admin/telemetry/events", "原始事件"],
+  ];
+  return `<nav class="report-tabs">${tabs.map(([href, label]) => `<a class="${active === href ? "active" : ""}" href="${href}">${label}</a>`).join("")}</nav>`;
+}
+
+function rangeSwitch(path: string, active: number, productId: string): string {
+  return `<div class="range-switch" aria-label="时间范围">${[7, 14, 30].map((days) => `<a class="${active === days ? "active" : ""}" href="${path}?days=${days}&product_id=${encodeURIComponent(productId)}">${days}天</a>`).join("")}</div>`;
+}
+
+function pageLink(path: string, params: Record<string, string | number>, page: number): string {
+  const search = new URLSearchParams(Object.entries({ ...params, page }).map(([key, value]) => [key, String(value)]));
+  return `${path}?${search.toString()}`;
+}
+
+function devicePagination(path: string, params: Record<string, string | number>, page: number, pageSize: number, total: number): string {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  return `<div class="pagination"><span class="muted">共 ${total} 台，第 ${page} / ${pages} 页</span><div class="pagination-links"><a class="btn ${page <= 1 ? "disabled" : ""}" href="${pageLink(path, params, Math.max(1, page - 1))}">上一页</a><a class="btn ${page >= pages ? "disabled" : ""}" href="${pageLink(path, params, Math.min(pages, page + 1))}">下一页</a></div></div>`;
+}
+
+function retentionHeat(rate: number): string {
+  if (rate >= 50) return "heat-4";
+  if (rate >= 25) return "heat-3";
+  if (rate >= 10) return "heat-2";
+  if (rate > 0) return "heat-1";
+  return "heat-0";
 }
 
 function shortId(value: string | null): string {
@@ -571,10 +622,10 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     <h3>失败和取消</h3><table><thead><tr><th>结果</th><th>事件次数</th><th>设备数</th><th>占漏斗起点</th></tr></thead><tbody>${outcomeRows}</tbody></table>
     <h3>版本 / 渠道 / 授权状态</h3><table><thead><tr><th>版本</th><th>渠道</th><th>授权</th><th>行为设备</th><th>免费模型</th><th>点击导入</th><th>导入成功</th><th>导入转化</th><th>点击购买</th><th>购买页打开率</th></tr></thead><tbody>${dimensionRows || `<tr><td colspan="10" class="muted">暂无数据</td></tr>`}</tbody></table>
     <p class="muted">漏斗按同一设备在筛选时间范围内的事件先后顺序计算；百分比使用独立设备数，事件次数单独展示。购买成功需接入支付 Webhook 后才能形成最终成交漏斗。</p>`;
-    return c.html(shell("产品分析", "/admin/telemetry/products", content));
+    return c.html(shell("行为漏斗", "/admin/telemetry/products", `<div class="report-shell">${reportTabs("/admin/telemetry/products")}${content}</div>`));
   });
 
-  router.get("/telemetry/reports", async (c) => {
+  router.get("/telemetry/usage", async (c) => {
     const days = Math.min(90, Math.max(1, Number(c.req.query("days") || 14)));
     const productId = c.req.query("product_id") || "animate";
     const report = await getTelemetryReport(db, { days, productId });
@@ -584,19 +635,19 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
       ["首次安装", report.totals.installs],
       ["活跃机器", report.totals.activeMachines],
       ["启动次数", report.totals.launches],
-      ["运行时长", formatHours(report.totals.activeSecs)],
-      ["Overlay 时长", formatHours(report.totals.overlayVisibleSecs)],
+      ["运行时长", formatDuration(report.totals.activeSecs)],
+      ["Overlay 时长", formatDuration(report.totals.overlayVisibleSecs)],
     ]
       .map(([label, value]) => `<div class="card stat"><div class="num">${e(value)}</div><div class="muted">${e(label)}</div></div>`)
       .join("");
     const dailyRows = report.daily
-      .map((r) => `<tr><td>${e(r.day)}</td><td>${r.downloads}</td><td>${r.installs}</td><td>${r.activeMachines}</td><td>${r.launches}</td><td>${formatHours(r.activeSecs)}</td><td>${formatHours(r.overlayVisibleSecs)}</td><td>${r.events}</td></tr>`)
+      .map((r) => `<tr><td>${e(r.day)}</td><td>${r.downloads}</td><td>${r.installs}</td><td>${r.activeMachines}</td><td>${r.launches}</td><td>${formatDuration(r.activeSecs)}</td><td>${formatDuration(r.overlayVisibleSecs)}</td><td>${r.events}</td></tr>`)
       .join("");
     const usageRows = machineUsage
       .map((r) => `<tr><td><code>${e(shortId(r.machineHash))}</code></td><td>${e(r.firstSeenAt)}</td><td>${e(r.lastSeenAt)}</td><td class="num-cell">${r.activeDays}</td><td class="num-cell">${r.launches}</td><td class="num-cell">${r.sessions}</td><td class="num-cell">${e(formatDuration(r.activeSecs))}</td><td class="num-cell">${e(formatDuration(r.overlayVisibleSecs))}</td><td>${e(r.platform)}</td><td>${e(r.appVersion)}</td><td>${r.licenseStates.map((state) => badge(state)).join(" ") || badge("unknown")}</td></tr>`)
       .join("");
     const versionRows = report.versions
-      .map((r) => `<tr><td>${e(r.appVersion)}</td><td>${r.activeMachines}</td><td>${r.launches}</td><td>${formatHours(r.activeSecs)}</td></tr>`)
+      .map((r) => `<tr><td>${e(r.appVersion)}</td><td>${r.activeMachines}</td><td>${r.launches}</td><td>${formatDuration(r.activeSecs)}</td></tr>`)
       .join("");
     const stateRows = report.licenseStates
       .map((r) => `<tr><td>${badge(r.licenseState)}</td><td>${r.activeMachines}</td><td>${r.launches}</td></tr>`)
@@ -607,7 +658,69 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     const dayOptions = [7, 14, 30, 60, 90].map((value) => `<option value="${value}"${value === days ? " selected" : ""}>最近 ${value} 天</option>`).join("");
     const dailyTable = `<div class="table-card"><div class="table-caption"><div><h2>每日趋势</h2><p>活跃机器为当天去重的匿名设备数。</p></div></div><div class="table-scroll"><table><thead><tr><th>日期</th><th>下载</th><th>安装</th><th>活跃机器</th><th>启动</th><th>运行时长</th><th>Overlay 时长</th><th>事件</th></tr></thead><tbody>${dailyRows || `<tr><td colspan="8" class="muted">暂无数据</td></tr>`}</tbody></table></div></div>`;
     const usageTable = `<div class="table-card"><div class="table-caption"><div><h2>设备使用明细</h2><p>按匿名设备汇总，不包含可识别个人信息；按总运行时长排序。</p></div><span class="muted">${machineUsage.length} 台设备</span></div><div class="table-scroll"><table><thead><tr><th>设备</th><th>首次活跃</th><th>最后活跃</th><th>活跃天数</th><th>启动</th><th>会话</th><th>运行时长</th><th>Overlay 时长</th><th>平台</th><th>版本</th><th>授权状态</th></tr></thead><tbody>${usageRows || `<tr><td colspan="11" class="muted">暂无会话数据</td></tr>`}</tbody></table></div></div>`;
-    return c.html(shell("统计报表", "/admin/telemetry/reports", `<div class="toolbar"><form method="get" class="actions"><label style="width:130px">产品<input name="product_id" value="${e(productId)}"></label><label style="width:150px">统计周期<select name="days">${dayOptions}</select></label><button class="primary">刷新统计</button></form><a class="btn" href="/admin/telemetry/events">查看原始事件</a></div><div class="grid stats">${cards}</div>${dailyTable}${usageTable}<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-top:14px"><div class="table-card"><div class="table-caption"><h3>版本分布</h3></div><table><thead><tr><th>版本</th><th>活跃机器</th><th>启动</th><th>运行时长</th></tr></thead><tbody>${versionRows || `<tr><td colspan="4" class="muted">暂无数据</td></tr>`}</tbody></table></div><div class="table-card"><div class="table-caption"><h3>授权状态</h3></div><table><thead><tr><th>状态</th><th>活跃机器</th><th>启动</th></tr></thead><tbody>${stateRows || `<tr><td colspan="3" class="muted">暂无数据</td></tr>`}</tbody></table></div><div class="table-card"><div class="table-caption"><h3>平台分布</h3></div><table><thead><tr><th>平台</th><th>活跃机器</th><th>安装</th><th>下载</th></tr></thead><tbody>${platformRows || `<tr><td colspan="4" class="muted">暂无数据</td></tr>`}</tbody></table></div></div>`));
+    return c.html(shell("设备总览", "/admin/telemetry/usage", `<div class="report-shell">${reportTabs("/admin/telemetry/usage")}<div class="toolbar"><form method="get" class="actions"><label style="width:130px">产品<input name="product_id" value="${e(productId)}"></label><label style="width:150px">统计周期<select name="days">${dayOptions}</select></label><button class="primary">刷新统计</button></form><a class="btn" href="/admin/telemetry/events">查看原始事件</a></div><div class="grid stats">${cards}</div>${dailyTable}${usageTable}<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-top:14px"><div class="table-card"><div class="table-caption"><h3>版本分布</h3></div><table><thead><tr><th>版本</th><th>活跃机器</th><th>启动</th><th>运行时长</th></tr></thead><tbody>${versionRows || `<tr><td colspan="4" class="muted">暂无数据</td></tr>`}</tbody></table></div><div class="table-card"><div class="table-caption"><h3>授权状态</h3></div><table><thead><tr><th>状态</th><th>活跃机器</th><th>启动</th></tr></thead><tbody>${stateRows || `<tr><td colspan="3" class="muted">暂无数据</td></tr>`}</tbody></table></div><div class="table-card"><div class="table-caption"><h3>平台分布</h3></div><table><thead><tr><th>平台</th><th>活跃机器</th><th>安装</th><th>下载</th></tr></thead><tbody>${platformRows || `<tr><td colspan="4" class="muted">暂无数据</td></tr>`}</tbody></table></div></div></div>`));
+  });
+
+  router.get("/telemetry/reports", (c) => c.redirect("/admin/telemetry/installs"));
+
+  router.get("/telemetry/installs", async (c) => {
+    const days = Number(c.req.query("days") || 30);
+    const productId = c.req.query("product_id") || "animate";
+    const report = await getInstallationDays(db, { days, productId });
+    const today = report.days[0]?.installs || 0;
+    const average = Math.round((report.total / report.filters.days) * 10) / 10;
+    const rows = report.days.map((row) => {
+      const href = `/admin/telemetry/installs/${row.day}?product_id=${encodeURIComponent(productId)}`;
+      return `<tr class="click-row" onclick="location.href='${href}'"><td><a class="day-link" href="${href}">${e(row.day)}</a></td><td class="number-cell">${row.installs}</td><td><span class="muted">查看设备明细 →</span></td></tr>`;
+    }).join("");
+    const content = `${reportTabs("/admin/telemetry/installs")}<div class="report-head"><div><h2>每日新增安装</h2><p class="muted">按匿名安装设备 ID 的首次上报日期统计</p></div>${rangeSwitch("/admin/telemetry/installs", report.filters.days, productId)}</div><div class="metric-strip"><div class="metric"><div class="metric-label">今日新增</div><div class="metric-value">${today}</div></div><div class="metric"><div class="metric-label">所选周期新增</div><div class="metric-value">${report.total}</div></div><div class="metric"><div class="metric-label">日均新增</div><div class="metric-value">${average}</div></div></div><section class="report-section"><div class="section-head"><h3>按日安装数量</h3><span>点击日期查看设备</span></div><table><thead><tr><th>日期</th><th>新增设备</th><th>详情</th></tr></thead><tbody>${rows}</tbody></table></section>`;
+    return c.html(shell("新增安装", "/admin/telemetry/installs", `<div class="report-shell">${content}</div>`));
+  });
+
+  router.get("/telemetry/installs/:day", async (c) => {
+    const day = validReportDay(c.req.param("day"));
+    const productId = c.req.query("product_id") || "animate";
+    const result = await listInstallationsForDay(db, { day, productId, page: Number(c.req.query("page") || 1) });
+    const rows = result.items.map((row) => `<tr><td class="identity">${e(shortId(row.installId))}</td><td>${e(row.firstInstalledAt)}</td><td>${e(row.appVersion)}</td><td>${e(row.platform)}</td><td>${e(row.channel)}</td><td>${badge(row.licenseState)}</td><td class="identity">${e(shortId(row.machineHash))}</td></tr>`).join("");
+    const content = `${reportTabs("/admin/telemetry/installs")}<div class="report-head"><div><a class="day-link" href="/admin/telemetry/installs">← 返回每日新增</a><h2 style="margin-top:10px">${e(day)} 新增设备</h2><p class="muted">首次安装上报的匿名设备明细</p></div></div><section class="report-section"><table><thead><tr><th>安装设备 ID</th><th>首次上报</th><th>版本</th><th>平台</th><th>渠道</th><th>授权状态</th><th>机器 Hash</th></tr></thead><tbody>${rows || `<tr><td colspan="7" class="muted">当天暂无新增安装</td></tr>`}</tbody></table>${devicePagination(`/admin/telemetry/installs/${day}`, { product_id: productId }, result.page, result.pageSize, result.total)}</section>`;
+    return c.html(shell("安装设备明细", "/admin/telemetry/installs", `<div class="report-shell">${content}</div>`));
+  });
+
+  router.get("/telemetry/activity", async (c) => {
+    const days = Number(c.req.query("days") || 30);
+    const productId = c.req.query("product_id") || "animate";
+    const report = await getActivityDays(db, { days, productId });
+    const today = report.days[0] || { devices: 0, activeSecs: 0, averageActiveSecs: 0, launches: 0 };
+    const rows = report.days.map((row) => {
+      const href = `/admin/telemetry/activity/${row.day}?product_id=${encodeURIComponent(productId)}`;
+      return `<tr class="click-row" onclick="location.href='${href}'"><td><a class="day-link" href="${href}">${e(row.day)}</a></td><td class="number-cell">${row.devices}</td><td class="duration">${formatDeviceDuration(row.activeSecs)}</td><td class="duration">${formatDeviceDuration(row.averageActiveSecs)}</td><td>${row.launches}</td><td><span class="muted">查看设备明细 →</span></td></tr>`;
+    }).join("");
+    const content = `${reportTabs("/admin/telemetry/activity")}<div class="report-head"><div><h2>每日活跃设备</h2><p class="muted">当日产生会话行为的匿名安装设备</p></div>${rangeSwitch("/admin/telemetry/activity", report.filters.days, productId)}</div><div class="metric-strip"><div class="metric"><div class="metric-label">今日活跃设备</div><div class="metric-value">${today.devices}</div></div><div class="metric"><div class="metric-label">今日总活跃时长</div><div class="metric-value">${formatDeviceDuration(today.activeSecs)}</div></div><div class="metric"><div class="metric-label">设备平均时长</div><div class="metric-value">${formatDeviceDuration(today.averageActiveSecs)}</div></div></div><section class="report-section"><div class="section-head"><h3>按日活跃情况</h3><span>点击日期查看每台设备时长</span></div><table><thead><tr><th>日期</th><th>活跃设备</th><th>总活跃时长</th><th>平均时长</th><th>启动次数</th><th>详情</th></tr></thead><tbody>${rows}</tbody></table></section>`;
+    return c.html(shell("活跃设备", "/admin/telemetry/activity", `<div class="report-shell">${content}</div>`));
+  });
+
+  router.get("/telemetry/activity/:day", async (c) => {
+    const day = validReportDay(c.req.param("day"));
+    const productId = c.req.query("product_id") || "animate";
+    const result = await listActiveDevicesForDay(db, { day, productId, page: Number(c.req.query("page") || 1) });
+    const rows = result.items.map((row) => `<tr><td class="identity">${e(shortId(row.installId))}</td><td class="duration"><b>${formatDeviceDuration(row.activeSecs)}</b></td><td class="duration">${formatDeviceDuration(row.overlayVisibleSecs)}</td><td>${row.launches}</td><td>${row.sessions}</td><td>${e(row.appVersion)}</td><td>${e(row.channel)}</td><td>${badge(row.licenseState)}</td><td>${e(row.lastActiveAt)}</td></tr>`).join("");
+    const content = `${reportTabs("/admin/telemetry/activity")}<div class="report-head"><div><a class="day-link" href="/admin/telemetry/activity">← 返回每日活跃</a><h2 style="margin-top:10px">${e(day)} 活跃设备</h2><p class="muted">按当日累计活跃时长从高到低排列</p></div></div><section class="report-section"><table><thead><tr><th>安装设备 ID</th><th>活跃时长</th><th>陪伴可见时长</th><th>启动</th><th>会话</th><th>版本</th><th>渠道</th><th>授权</th><th>最后活跃</th></tr></thead><tbody>${rows || `<tr><td colspan="9" class="muted">当天暂无活跃设备</td></tr>`}</tbody></table>${devicePagination(`/admin/telemetry/activity/${day}`, { product_id: productId }, result.page, result.pageSize, result.total)}</section>`;
+    return c.html(shell("活跃设备明细", "/admin/telemetry/activity", `<div class="report-shell">${content}</div>`));
+  });
+
+  router.get("/telemetry/retention", async (c) => {
+    const days = Number(c.req.query("days") || 30);
+    const productId = c.req.query("product_id") || "animate";
+    const report = await getRetentionReport(db, { days, productId });
+    const summary = report.offsets.map((offset) => `<div class="metric"><div class="metric-label">D${offset} 加权留存</div><div class="metric-value">${report.summary[offset].ratePct}%</div><div class="muted">${report.summary[offset].devices} / ${report.summary[offset].cohortDevices} 台</div></div>`).join("");
+    const rows = report.rows.map((row) => `<tr><td><span class="day-link">${e(row.cohortDay)}</span></td><td class="number-cell">${row.installs}</td>${report.offsets.map((offset) => {
+      const value = row.retention[offset];
+      return value === null
+        ? `<td class="retention-cell empty-cell">—</td>`
+        : `<td class="retention-cell ${retentionHeat(value.ratePct)}"><b>${value.ratePct}%</b><span>${value.devices} 台</span></td>`;
+    }).join("")}</tr>`).join("");
+    const content = `${reportTabs("/admin/telemetry/retention")}<div class="report-head"><div><h2>安装设备留存</h2><p class="muted">同一安装设备在首次安装后的指定自然日再次活跃</p></div>${rangeSwitch("/admin/telemetry/retention", report.filters.days, productId)}</div><div class="metric-strip">${summary}</div><section class="report-section"><div class="section-head"><h3>Cohort 留存矩阵</h3><span>— 表示该 cohort 尚未到达对应日期</span></div><div class="retention-wrap"><table class="retention-table"><thead><tr><th>安装日期</th><th>新增设备</th>${report.offsets.map((offset) => `<th>D${offset}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div></section>`;
+    return c.html(shell("留存分析", "/admin/telemetry/retention", `<div class="report-shell">${content}</div>`));
   });
 
   router.get("/telemetry/events", async (c) => {
@@ -625,7 +738,7 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     const rows = result.items
       .map((x) => `<tr><td>${e(x.receivedAt)}</td><td>${e(x.event)}</td><td>${e(x.productId)}</td><td>${e(x.appVersion || "-")}</td><td>${e(x.platform || "-")}</td><td>${e(x.sourceId)}</td><td>${badge(x.licenseState || "unknown")}</td><td><code>${e(shortId(x.machineHash))}</code></td><td><code>${e(shortId(x.installId))}</code></td><td><code>${e(shortId(x.sessionId))}</code></td><td>${e(payloadSummary(x.payloadJson))}</td></tr>`)
       .join("");
-    return c.html(shell("统计事件", "/admin/telemetry/events", `<div class="toolbar"><form method="get" class="actions"><input name="event" value="${e(params.event || "")}" placeholder="event" style="width:150px"><input name="product_id" value="${e(params.productId || "")}" placeholder="product_id" style="width:130px"><input name="machine_hash" value="${e(params.machineHash || "")}" placeholder="machine hash" style="width:180px"><input name="install_id" value="${e(params.installId || "")}" placeholder="install_id" style="width:180px"><input name="session_id" value="${e(params.sessionId || "")}" placeholder="session_id" style="width:180px"><button>筛选</button></form><a class="btn" href="/admin/telemetry/reports">查看报表</a></div><table><thead><tr><th>接收时间</th><th>事件</th><th>产品</th><th>版本</th><th>平台</th><th>来源</th><th>授权</th><th>机器</th><th>安装</th><th>会话</th><th>Payload</th></tr></thead><tbody>${rows || `<tr><td colspan="11" class="muted">暂无事件</td></tr>`}</tbody></table><div class="muted" style="margin-top:10px">共 ${result.total} 条，当前第 ${page} 页</div>`));
+    return c.html(shell("原始事件", "/admin/telemetry/events", `<div class="report-shell">${reportTabs("/admin/telemetry/events")}<div class="toolbar"><form method="get" class="actions"><input name="event" value="${e(params.event || "")}" placeholder="event" style="width:150px"><input name="product_id" value="${e(params.productId || "")}" placeholder="product_id" style="width:130px"><input name="machine_hash" value="${e(params.machineHash || "")}" placeholder="machine hash" style="width:180px"><input name="install_id" value="${e(params.installId || "")}" placeholder="install_id" style="width:180px"><input name="session_id" value="${e(params.sessionId || "")}" placeholder="session_id" style="width:180px"><button>筛选</button></form></div><div class="report-section"><table><thead><tr><th>接收时间</th><th>事件</th><th>产品</th><th>版本</th><th>平台</th><th>来源</th><th>授权</th><th>机器</th><th>安装</th><th>会话</th><th>Payload</th></tr></thead><tbody>${rows || `<tr><td colspan="11" class="muted">暂无事件</td></tr>`}</tbody></table><div class="pagination"><span class="muted">共 ${result.total} 条，当前第 ${page} 页</span></div></div></div>`));
   });
 
   router.get("/logs", async (c) => {
