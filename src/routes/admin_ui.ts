@@ -28,6 +28,7 @@ import {
   getTelemetryMachineUsage,
   getTelemetryReport,
   getRetentionReport,
+  getStartupDiagnostics,
   listActiveDevicesForDay,
   listInstallationsForDay,
   listTelemetryEvents,
@@ -90,6 +91,7 @@ const navItems = [
   ["/admin/providers", "支付映射"],
   ["/admin/telemetry/installs", "新增安装"],
   ["/admin/telemetry/activity", "活跃设备"],
+  ["/admin/telemetry/startup", "启动诊断"],
   ["/admin/telemetry/retention", "留存分析"],
   ["/admin/telemetry/usage", "设备总览"],
   ["/admin/telemetry/products", "行为漏斗"],
@@ -171,6 +173,7 @@ function reportTabs(active: string): string {
   const tabs = [
     ["/admin/telemetry/installs", "新增安装"],
     ["/admin/telemetry/activity", "活跃设备"],
+    ["/admin/telemetry/startup", "启动诊断"],
     ["/admin/telemetry/retention", "留存分析"],
     ["/admin/telemetry/usage", "设备总览"],
     ["/admin/telemetry/products", "行为漏斗"],
@@ -707,6 +710,29 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     const rows = result.items.map((row) => `<tr><td class="identity">${e(shortId(row.installId))}</td><td class="duration"><b>${formatDeviceDuration(row.activeSecs)}</b></td><td class="duration">${formatDeviceDuration(row.overlayVisibleSecs)}</td><td>${row.launches}</td><td>${row.sessions}</td><td>${e(row.appVersion)}</td><td>${e(row.channel)}</td><td>${badge(row.licenseState)}</td><td>${e(row.lastActiveAt)}</td></tr>`).join("");
     const content = `${reportTabs("/admin/telemetry/activity")}<div class="report-head"><div><a class="day-link" href="/admin/telemetry/activity">← 返回每日活跃</a><h2 style="margin-top:10px">${e(day)} 活跃设备</h2><p class="muted">按当日累计活跃时长从高到低排列</p></div></div><section class="report-section"><table><thead><tr><th>安装设备 ID</th><th>活跃时长</th><th>陪伴可见时长</th><th>启动</th><th>会话</th><th>版本</th><th>渠道</th><th>授权</th><th>最后活跃</th></tr></thead><tbody>${rows || `<tr><td colspan="9" class="muted">当天暂无活跃设备</td></tr>`}</tbody></table>${devicePagination(`/admin/telemetry/activity/${day}`, { product_id: productId }, result.page, result.pageSize, result.total)}</section>`;
     return c.html(shell("活跃设备明细", "/admin/telemetry/activity", `<div class="report-shell">${content}</div>`));
+  });
+
+  router.get("/telemetry/startup", async (c) => {
+    const day = validReportDay(c.req.query("day"));
+    const productId = c.req.query("product_id") || "animate";
+    const report = await getStartupDiagnostics(db, { day, productId });
+    const s = report.summary;
+    const cards = [
+      ["启动会话", s.sessions], ["无后续事件", s.noFollowup], ["缺少 1 分钟探针", s.no1mCheckpoint],
+      ["未完成首帧", s.noFirstFrame], ["主动启动失败", s.startupFailed], ["首帧后短退出", s.shortAfterFrame],
+      ["启动正常", s.startupOk],
+    ].map(([label, value]) => `<div class="metric"><div class="metric-label">${label}</div><div class="metric-value">${value}</div></div>`).join("");
+    const diagnosisLabel: Record<string, string> = {
+      no_followup_event: "仅启动事件",
+      no_1m_checkpoint: "未到 1 分钟探针",
+      no_first_frame: "未完成首帧",
+      startup_failed: "启动失败",
+      first_frame_short_exit: "首帧后短退出",
+      startup_ok: "启动正常",
+    };
+    const rows = report.rows.map((row) => `<tr><td class="identity">${e(shortId(row.machineHash))}</td><td class="identity">${e(shortId(row.installId))}</td><td class="identity">${e(shortId(row.sessionId))}</td><td>${e(diagnosisLabel[row.diagnosis] || row.diagnosis)}</td><td>${row.processSecs} 秒</td><td>${row.checkpoints}</td><td>${row.firstFrame ? "是" : "否"}</td><td>${e(row.lastAt)}</td></tr>`).join("");
+    const content = `${reportTabs("/admin/telemetry/startup")}<div class="report-head"><div><h2>启动诊断</h2><p class="muted">优先定位短会话、首帧缺失和启动失败；设备按 machine_hash，安装按 install_id</p></div><form class="actions" method="get"><input type="date" name="day" value="${e(day)}"><input name="product_id" value="${e(productId)}" style="width:120px"><button class="primary">刷新</button></form></div><div class="metric-strip">${cards}</div><section class="report-section"><div class="section-head"><h3>${e(day)} 启动会话明细</h3><span>按运行时长从短到长排列</span></div><table><thead><tr><th>机器 Hash</th><th>安装 ID</th><th>会话 ID</th><th>诊断分类</th><th>运行时长</th><th>探针数</th><th>首帧</th><th>最后事件</th></tr></thead><tbody>${rows || `<tr><td colspan="8" class="muted">暂无启动事件</td></tr>`}</tbody></table></section>`;
+    return c.html(shell("启动诊断", "/admin/telemetry/startup", `<div class="report-shell">${content}</div>`));
   });
 
   router.get("/telemetry/retention", async (c) => {

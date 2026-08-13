@@ -1173,6 +1173,66 @@ export async function getRetentionReport(
   return { filters: { days, productId }, offsets, rows, summary };
 }
 
+export async function getStartupDiagnostics(
+  db: Database,
+  params: { day?: string; productId?: string } = {}
+) {
+  const day = params.day || new Date().toISOString().slice(0, 10);
+  const productId = params.productId || "animate";
+  const events = await db.select().from(telemetryEvents).where(and(
+    eq(telemetryEvents.productId, productId),
+    gte(telemetryEvents.receivedAt, `${day} 00:00:00`),
+    lte(telemetryEvents.receivedAt, `${day} 23:59:59`),
+  )).orderBy(telemetryEvents.receivedAt).all();
+  const sessions = new Map<string, {
+    sessionId: string; machineHash: string | null; installId: string | null;
+    startedAt: string; lastAt: string; checkpoints: number; firstCheckpoint: boolean;
+    firstFrame: boolean; frontendMounted: boolean; modelLoaded: boolean; startupFailed: boolean;
+    processSecs: number; lastStage: string; hasFollowup: boolean;
+  }>();
+  for (const event of events) {
+    const id = event.sessionId;
+    if (!id) continue;
+    const row = sessions.get(id) || {
+      sessionId: id, machineHash: event.machineHash, installId: event.installId,
+      startedAt: event.receivedAt, lastAt: event.receivedAt, checkpoints: 0,
+      firstCheckpoint: false, firstFrame: false, frontendMounted: false, modelLoaded: false,
+      startupFailed: false, processSecs: 0, lastStage: "session_start", hasFollowup: false,
+    };
+    row.machineHash ||= event.machineHash;
+    row.installId ||= event.installId;
+    row.lastAt = event.receivedAt;
+    if (event.event !== "session_start") row.hasFollowup = true;
+    if (event.event === "session_checkpoint" || event.event === "session_heartbeat") {
+      row.checkpoints += 1;
+      row.firstCheckpoint ||= row.checkpoints === 1;
+      try {
+        const payload = JSON.parse(event.payloadJson) as Record<string, unknown>;
+        row.processSecs = Math.max(row.processSecs, Number(payload.process_duration_secs) || 0);
+      } catch { /* Keep raw event usable even if payload is malformed. */ }
+    }
+    if (event.event === "frontend_mounted") row.frontendMounted = true;
+    if (event.event === "model_loaded") row.modelLoaded = true;
+    if (event.event === "first_frame_rendered") row.firstFrame = true;
+    if (event.event === "startup_failed") { row.startupFailed = true; row.lastStage = "startup_failed"; }
+    sessions.set(id, row);
+  }
+  const rows = Array.from(sessions.values()).map((row) => ({
+    ...row,
+    diagnosis: row.startupFailed ? "startup_failed" : !row.hasFollowup ? "no_followup_event" : !row.firstCheckpoint ? "no_1m_checkpoint" : !row.firstFrame ? "no_first_frame" : row.processSecs <= 120 ? "first_frame_short_exit" : "startup_ok",
+  })).sort((a, b) => a.processSecs - b.processSecs || a.lastAt.localeCompare(b.lastAt));
+  const count = (diagnosis: string) => rows.filter((row) => row.diagnosis === diagnosis).length;
+  return {
+    day, productId, total: rows.length,
+    summary: {
+      sessions: rows.length, noFollowup: count("no_followup_event"), no1mCheckpoint: count("no_1m_checkpoint"),
+      noFirstFrame: count("no_first_frame"), startupFailed: count("startup_failed"), shortAfterFrame: count("first_frame_short_exit"),
+      startupOk: count("startup_ok"),
+    },
+    rows,
+  };
+}
+
 function percentage(numerator: number, denominator: number): number {
   if (denominator <= 0) return 0;
   return Math.round((numerator / denominator) * 1000) / 10;
