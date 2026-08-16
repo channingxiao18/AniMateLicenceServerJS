@@ -6,6 +6,7 @@ import {
   getInstallationDays,
   getProductAnalyticsReport,
   getRetentionReport,
+  getStartupDiagnostics,
   getTelemetryReport,
   listActiveDevicesForDay,
   listInstallationsForDay,
@@ -376,5 +377,35 @@ describe("telemetry", () => {
     const cohort = retention.rows.find((row) => row.cohortDay === cohortDay);
     expect(cohort?.retention[1]).toMatchObject({ devices: 1, ratePct: 100 });
     expect(cohort?.retention[3]).toMatchObject({ devices: 1, ratePct: 100 });
+  });
+
+  it("uses session_end duration in startup diagnostics", async () => {
+    const env = await createTestEnv();
+    const sessionId = "67676767-6767-4676-8676-676767676767";
+    const base = event({ install_id: "78787878-7878-4787-8787-787878787878", session_id: sessionId });
+    const receivedAt = new Date("2026-08-15T10:00:00.000Z");
+
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "89898989-8989-4898-8898-898989898989",
+      event: "session_start",
+      payload: { started_at: Math.floor(receivedAt.getTime() / 1000) },
+    }, receivedAt);
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "90909090-9090-4909-8909-909090909090",
+      event: "first_frame_rendered",
+      payload: {},
+    }, new Date(receivedAt.getTime() + 5000));
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "abababab-abab-4aba-8aba-abababababab",
+      event: "session_end",
+      payload: { process_duration_secs: 90, overlay_visible_secs: 30, reason: "user_exit" },
+    }, new Date(receivedAt.getTime() + 90000));
+
+    const report = await getStartupDiagnostics(env.db, { day: "2026-08-15", productId: "animate" });
+    expect(report.rows).toHaveLength(1);
+    expect(report.rows[0]).toMatchObject({ processSecs: 90, diagnosis: "no_1m_checkpoint" });
   });
 });

@@ -724,7 +724,7 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     ].map(([label, value]) => `<div class="metric"><div class="metric-label">${label}</div><div class="metric-value">${value}</div></div>`).join("");
     const diagnosisLabel: Record<string, string> = {
       no_followup_event: "仅启动事件",
-      no_1m_checkpoint: "未到 1 分钟探针",
+      no_1m_checkpoint: "未收到 1 分钟探针",
       no_first_frame: "未完成首帧",
       startup_failed: "启动失败",
       first_frame_short_exit: "首帧后短退出",

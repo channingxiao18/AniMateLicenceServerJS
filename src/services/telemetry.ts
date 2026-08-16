@@ -1186,7 +1186,7 @@ export async function getStartupDiagnostics(
   )).orderBy(telemetryEvents.receivedAt).all();
   const sessions = new Map<string, {
     sessionId: string; machineHash: string | null; installId: string | null;
-    startedAt: string; lastAt: string; checkpoints: number; firstCheckpoint: boolean;
+    startedAt: string; lastAt: string; checkpoints: number; firstCheckpoint: boolean; oneMinuteCheckpoint: boolean;
     firstFrame: boolean; frontendMounted: boolean; modelLoaded: boolean; startupFailed: boolean;
     processSecs: number; lastStage: string; hasFollowup: boolean;
   }>();
@@ -1196,7 +1196,7 @@ export async function getStartupDiagnostics(
     const row = sessions.get(id) || {
       sessionId: id, machineHash: event.machineHash, installId: event.installId,
       startedAt: event.receivedAt, lastAt: event.receivedAt, checkpoints: 0,
-      firstCheckpoint: false, firstFrame: false, frontendMounted: false, modelLoaded: false,
+      firstCheckpoint: false, oneMinuteCheckpoint: false, firstFrame: false, frontendMounted: false, modelLoaded: false,
       startupFailed: false, processSecs: 0, lastStage: "session_start", hasFollowup: false,
     };
     row.machineHash ||= event.machineHash;
@@ -1208,7 +1208,15 @@ export async function getStartupDiagnostics(
       row.firstCheckpoint ||= row.checkpoints === 1;
       try {
         const payload = JSON.parse(event.payloadJson) as Record<string, unknown>;
-        row.processSecs = Math.max(row.processSecs, Number(payload.process_duration_secs) || 0);
+        const processSecs = safePayloadDuration(payload, "process_duration_secs");
+        row.processSecs = Math.max(row.processSecs, processSecs);
+        row.oneMinuteCheckpoint ||= processSecs >= 60;
+      } catch { /* Keep raw event usable even if payload is malformed. */ }
+    }
+    if (event.event === "session_end" || event.event === "session_unclean_end") {
+      try {
+        const payload = JSON.parse(event.payloadJson) as Record<string, unknown>;
+        row.processSecs = Math.max(row.processSecs, safePayloadDuration(payload, "process_duration_secs"));
       } catch { /* Keep raw event usable even if payload is malformed. */ }
     }
     if (event.event === "frontend_mounted") row.frontendMounted = true;
@@ -1219,7 +1227,7 @@ export async function getStartupDiagnostics(
   }
   const rows = Array.from(sessions.values()).map((row) => ({
     ...row,
-    diagnosis: row.startupFailed ? "startup_failed" : !row.hasFollowup ? "no_followup_event" : !row.firstCheckpoint ? "no_1m_checkpoint" : !row.firstFrame ? "no_first_frame" : row.processSecs <= 120 ? "first_frame_short_exit" : "startup_ok",
+    diagnosis: row.startupFailed ? "startup_failed" : !row.hasFollowup ? "no_followup_event" : !row.oneMinuteCheckpoint ? "no_1m_checkpoint" : !row.firstFrame ? "no_first_frame" : row.processSecs <= 120 ? "first_frame_short_exit" : "startup_ok",
   })).sort((a, b) => a.processSecs - b.processSecs || a.lastAt.localeCompare(b.lastAt));
   const count = (diagnosis: string) => rows.filter((row) => row.diagnosis === diagnosis).length;
   return {
