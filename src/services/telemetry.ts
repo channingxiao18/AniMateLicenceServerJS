@@ -21,6 +21,7 @@ const EVENT_NAMES = new Set([
   "session_checkpoint",
   "session_end",
   "session_unclean_end",
+  "session_unclean_detected",
   "download_click",
   "native_started",
   "webview_created",
@@ -41,6 +42,10 @@ const EVENT_NAMES = new Set([
   "purchase_clicked",
   "checkout_opened",
   "purchase_failed",
+  "surface_event",
+  "avatar_interaction",
+  "dance_started",
+  "chat_opened",
 ]);
 
 const LICENSE_STATES = new Set([
@@ -106,6 +111,9 @@ const PRODUCT_EVENT_NAMES = [
   "purchase_clicked",
   "checkout_opened",
   "purchase_failed",
+  "avatar_interaction",
+  "dance_started",
+  "chat_opened",
 ] as const;
 
 type ProductEvent = {
@@ -323,7 +331,16 @@ async function updateAggregates(
     if (inserted) installs = 1;
   }
 
-  if (["session_start", "session_heartbeat", "session_checkpoint", "session_end", "session_unclean_end"].includes(envelope.event)) {
+  if ([
+    "session_start",
+    "session_heartbeat",
+    "session_checkpoint",
+    "session_end",
+    "session_unclean_end",
+    "session_unclean_detected",
+    "surface_event",
+    ...PRODUCT_EVENT_NAMES,
+  ].includes(envelope.event as any)) {
     if (envelope.machineHash) {
       await insertDailyUnique(db, dims, "machine_active", envelope.machineHash, receivedAt);
     }
@@ -821,6 +838,256 @@ export async function getTelemetryMachineUsage(
     .slice(0, limit);
 }
 
+export type TelemetryInstallDetail = {
+  installId: string;
+  productId: string;
+  machineHash: string | null;
+  firstSeenAt: string | null;
+  lastSeenAt: string | null;
+  platform: string;
+  channel: string;
+  appVersion: string;
+  licenseStates: string[];
+  totalEvents: number;
+  launches: number;
+  sessions: number;
+  activeSecs: number;
+  overlayVisibleSecs: number;
+  firstFrame: boolean;
+  workshopOpens: number;
+  settingsOpens: number;
+  cleanExits: number;
+  uncleanExits: number;
+  events: TelemetryEventRow[];
+  totalFilteredEvents: number;
+};
+
+function telemetryPayload(row: TelemetryEventRow): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(row.payloadJson);
+    return isObject(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function telemetryOccurredAt(row: TelemetryEventRow): number {
+  try {
+    const raw = JSON.parse(row.rawJson);
+    const value = Number(raw?.occurred_at_unix_ms);
+    if (Number.isFinite(value)) return value;
+  } catch {
+    // Fall back to server receive time for v1 events.
+  }
+  return row.receivedAtUnix * 1000;
+}
+
+export async function getTelemetryInstallDetail(
+  db: Database,
+  params: {
+    installId: string;
+    productId?: string;
+    event?: string;
+    surface?: string;
+    sessionId?: string;
+    page?: number;
+    pageSize?: number;
+  }
+): Promise<TelemetryInstallDetail> {
+  const productId = params.productId || "animate";
+  const all = await db.select().from(telemetryEvents).where(and(
+    eq(telemetryEvents.productId, productId),
+    eq(telemetryEvents.installId, params.installId),
+  )).all();
+  const ordered = all.sort((a, b) => telemetryOccurredAt(a) - telemetryOccurredAt(b) || a.receivedAt.localeCompare(b.receivedAt));
+  const filtered = ordered.filter((row) => {
+    if (params.event && row.event !== params.event) return false;
+    if (params.sessionId && row.sessionId !== params.sessionId) return false;
+    if (params.surface && String(telemetryPayload(row).surface || "") !== params.surface) return false;
+    return true;
+  });
+  const page = Math.max(1, Math.floor(params.page || 1));
+  const pageSize = Math.min(200, Math.max(1, Math.floor(params.pageSize || 100)));
+  const machineHash = ordered.find((row) => row.machineHash)?.machineHash || null;
+  const first = ordered[0];
+  const last = ordered[ordered.length - 1];
+  const licenseStates = Array.from(new Set(ordered.map((row) => row.licenseState).filter((value): value is string => Boolean(value)))).sort();
+  const sessions = new Set(ordered.map((row) => row.sessionId).filter((value): value is string => !!value));
+  const sessionMax = new Map<string, { process: number; overlay: number }>();
+  let activeSecs = 0;
+  let overlayVisibleSecs = 0;
+  for (const row of ordered) {
+    const payload = telemetryPayload(row);
+    if (!row.sessionId || !["session_heartbeat", "session_checkpoint", "session_end", "session_unclean_end"].includes(row.event)) continue;
+    const process = safePayloadDuration(payload, "process_duration_secs");
+    const visible = safePayloadDuration(payload, row.event === "session_checkpoint" || row.event === "session_unclean_end" || row.event === "session_unclean_detected" ? "companion_visible_secs" : "overlay_visible_secs");
+    const previous = sessionMax.get(row.sessionId) || { process: 0, overlay: 0 };
+    activeSecs += boundedDelta(process, previous.process);
+    overlayVisibleSecs += boundedDelta(visible, previous.overlay);
+    sessionMax.set(row.sessionId, { process: Math.max(previous.process, process), overlay: Math.max(previous.overlay, visible) });
+  }
+  return {
+    installId: params.installId,
+    productId,
+    machineHash,
+    firstSeenAt: first?.receivedAt || null,
+    lastSeenAt: last?.receivedAt || null,
+    platform: first?.platform || "unknown",
+    channel: first?.channel || "official",
+    appVersion: last?.appVersion || first?.appVersion || "unknown",
+    licenseStates,
+    totalEvents: ordered.length,
+    launches: ordered.filter((row) => row.event === "session_start").length,
+    sessions: sessions.size,
+    activeSecs,
+    overlayVisibleSecs,
+    firstFrame: ordered.some((row) => row.event === "first_frame_rendered"),
+    workshopOpens: ordered.filter((row) => row.event === "surface_event" && telemetryPayload(row).surface === "workshop" && telemetryPayload(row).action === "open").length,
+    settingsOpens: ordered.filter((row) => row.event === "surface_event" && telemetryPayload(row).surface === "settings" && telemetryPayload(row).action === "open").length,
+    cleanExits: ordered.filter((row) => row.event === "session_end").length,
+    uncleanExits: ordered.filter((row) => row.event === "session_unclean_detected" || row.event === "session_unclean_end").length,
+    events: filtered.slice((page - 1) * pageSize, page * pageSize),
+    totalFilteredEvents: filtered.length,
+  };
+}
+
+export type TelemetryUserSummary = {
+  machineHash: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  firstInstallAt: string | null;
+  installs: number;
+  launches: number;
+  sessions: number;
+  events: number;
+  activeSecs: number;
+  overlayVisibleSecs: number;
+  recentSessionSecs: number;
+  recentSessionAt: string | null;
+  lastEvent: string;
+  status: "active" | "recently_offline" | "likely_abandoned" | "likely_uninstalled";
+  platform: string;
+  appVersion: string;
+  channel: string;
+  licenseStates: string[];
+};
+
+function userStatus(lastSeenAt: string): TelemetryUserSummary["status"] {
+  const ageSecs = Math.max(0, (Date.now() - new Date(lastSeenAt.replace(" ", "T") + "Z").getTime()) / 1000);
+  if (ageSecs <= 6 * 3600) return "active";
+  if (ageSecs <= 24 * 3600) return "recently_offline";
+  if (ageSecs <= 7 * 86400) return "likely_abandoned";
+  return "likely_uninstalled";
+}
+
+export async function listTelemetryUsers(
+  db: Database,
+  params: {
+    productId?: string;
+    q?: string;
+    status?: string;
+    platform?: string;
+    sort?: "last_seen" | "first_seen" | "active_secs";
+    page?: number;
+    pageSize?: number;
+  } = {},
+): Promise<{ items: TelemetryUserSummary[]; total: number; page: number; pageSize: number }> {
+  const productId = params.productId || "animate";
+  const rows = await db.select().from(telemetryEvents).where(eq(telemetryEvents.productId, productId)).all();
+  const byMachine = new Map<string, TelemetryUserSummary & { sessionMax: Map<string, { process: number; overlay: number; startedAt: string; lastAt: string }> }>();
+  const sessionState = new Map<string, { machineHash: string; process: number; overlay: number; startedAt: string; lastAt: string }>();
+  for (const row of rows.sort((a, b) => a.receivedAt.localeCompare(b.receivedAt))) {
+    if (!row.machineHash) continue;
+    const current = byMachine.get(row.machineHash) || {
+      machineHash: row.machineHash,
+      firstSeenAt: row.receivedAt,
+      lastSeenAt: row.receivedAt,
+      firstInstallAt: null,
+      installs: 0,
+      launches: 0,
+      sessions: 0,
+      events: 0,
+      activeSecs: 0,
+      overlayVisibleSecs: 0,
+      recentSessionSecs: 0,
+      recentSessionAt: null,
+      lastEvent: row.event,
+      status: "active" as const,
+      platform: row.platform || "unknown",
+      appVersion: row.appVersion || "unknown",
+      channel: row.channel || "official",
+      licenseStates: [] as string[],
+      sessionMax: new Map(),
+    };
+    current.firstSeenAt = current.firstSeenAt < row.receivedAt ? current.firstSeenAt : row.receivedAt;
+    current.lastSeenAt = current.lastSeenAt > row.receivedAt ? current.lastSeenAt : row.receivedAt;
+    current.lastEvent = row.event;
+    current.events += 1;
+    current.platform = row.platform || current.platform;
+    current.appVersion = row.appVersion || current.appVersion;
+    current.channel = row.channel || current.channel;
+    if (row.licenseState && !current.licenseStates.includes(row.licenseState)) current.licenseStates.push(row.licenseState);
+    if (row.event === "install_seen") {
+      current.installs += 1;
+      current.firstInstallAt ||= row.receivedAt;
+    }
+    if (row.event === "session_start") {
+      current.launches += 1;
+      if (row.sessionId) {
+        current.sessions += 1;
+        sessionState.set(row.sessionId, { machineHash: row.machineHash, process: 0, overlay: 0, startedAt: row.receivedAt, lastAt: row.receivedAt });
+      }
+    }
+    if (row.sessionId && ["session_heartbeat", "session_checkpoint", "session_end", "session_unclean_end", "session_unclean_detected"].includes(row.event)) {
+      const payload = telemetryPayload(row);
+      const process = safePayloadDuration(payload, "process_duration_secs");
+      const visible = safePayloadDuration(payload, row.event === "session_checkpoint" || row.event === "session_unclean_end" || row.event === "session_unclean_detected" ? "companion_visible_secs" : "overlay_visible_secs");
+      const previous = sessionState.get(row.sessionId) || { machineHash: row.machineHash, process: 0, overlay: 0, startedAt: row.receivedAt, lastAt: row.receivedAt };
+      current.activeSecs += boundedDelta(process, previous.process);
+      current.overlayVisibleSecs += boundedDelta(visible, previous.overlay);
+      previous.process = Math.max(previous.process, process);
+      previous.overlay = Math.max(previous.overlay, visible);
+      previous.lastAt = row.receivedAt;
+      sessionState.set(row.sessionId, previous);
+    }
+    byMachine.set(row.machineHash, current);
+  }
+  for (const current of byMachine.values()) {
+    const sessions = Array.from(sessionState.values()).filter((session) => session.machineHash === current.machineHash);
+    const recent = sessions.sort((a, b) => b.lastAt.localeCompare(a.lastAt))[0];
+    current.recentSessionSecs = recent?.process || 0;
+    current.recentSessionAt = recent?.lastAt || null;
+    current.status = userStatus(current.lastSeenAt);
+    current.licenseStates.sort();
+  }
+  let items = Array.from(byMachine.values()).map(({ sessionMax: _sessionMax, ...row }) => row);
+  if (params.q) items = items.filter((row) => row.machineHash.includes(params.q!.toLowerCase()));
+  if (params.status) items = items.filter((row) => row.status === params.status);
+  if (params.platform) items = items.filter((row) => row.platform === params.platform);
+  const sort = params.sort || "last_seen";
+  items.sort((a, b) => sort === "first_seen" ? b.firstSeenAt.localeCompare(a.firstSeenAt) : sort === "active_secs" ? b.activeSecs - a.activeSecs : b.lastSeenAt.localeCompare(a.lastSeenAt));
+  const page = Math.max(1, Math.floor(params.page || 1));
+  const pageSize = Math.min(200, Math.max(1, Math.floor(params.pageSize || 50)));
+  return { items: items.slice((page - 1) * pageSize, page * pageSize), total: items.length, page, pageSize };
+}
+
+export async function getTelemetryMachineDetail(
+  db: Database,
+  params: { machineHash: string; productId?: string; event?: string; sessionId?: string; page?: number; pageSize?: number },
+): Promise<{ user: TelemetryUserSummary | null; events: TelemetryEventRow[]; total: number; page: number; pageSize: number }> {
+  const productId = params.productId || "animate";
+  const userResult = await listTelemetryUsers(db, { productId, q: params.machineHash, page: 1, pageSize: 1 });
+  const all = await db.select().from(telemetryEvents).where(and(eq(telemetryEvents.productId, productId), eq(telemetryEvents.machineHash, params.machineHash))).all();
+  const filtered = all.sort((a, b) => telemetryOccurredAt(a) - telemetryOccurredAt(b) || a.receivedAt.localeCompare(b.receivedAt)).filter((row) => {
+    if (params.event && row.event !== params.event) return false;
+    if (params.sessionId && row.sessionId !== params.sessionId) return false;
+    return true;
+  });
+  const page = Math.max(1, Math.floor(params.page || 1));
+  const pageSize = Math.min(200, Math.max(1, Math.floor(params.pageSize || 100)));
+  return { user: userResult.items[0] || null, events: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, pageSize };
+}
+
 function reportDays(value: number | undefined, fallback = 30): number {
   return Math.min(90, Math.max(1, Number.isFinite(value) ? Math.floor(value!) : fallback));
 }
@@ -1029,7 +1296,15 @@ export async function listActiveDevicesForDay(
   const productId = params.productId || "animate";
   const page = Math.max(1, Math.floor(params.page || 1));
   const pageSize = Math.min(100, Math.max(1, Math.floor(params.pageSize || 25)));
-  const all = (await loadDailyDeviceActivity(db, productId, params.day, params.day))
+  const daily = await loadDailyDeviceActivity(db, productId, params.day, params.day);
+  const lifetime = await loadLifetimeUsageByInstall(db, productId);
+  const installations = new Map((await loadInstallations(db, productId)).map((row) => [row.installId, row]));
+  const all = daily.map((row) => ({
+    ...row,
+    firstInstalledAt: installations.get(row.installId)?.firstInstalledAt || null,
+    lifetimeActiveSecs: lifetime.get(row.installId)?.activeSecs || 0,
+    lifetimeOverlayVisibleSecs: lifetime.get(row.installId)?.overlayVisibleSecs || 0,
+  }))
     .sort((a, b) => b.activeSecs - a.activeSecs || b.lastActiveAt.localeCompare(a.lastActiveAt));
   return {
     items: all.slice((page - 1) * pageSize, page * pageSize),
@@ -1063,11 +1338,20 @@ async function loadDailyDeviceActivity(
   start: string,
   end: string
 ): Promise<DailyDeviceActivity[]> {
-  const sessionEvents = ["session_start", "session_heartbeat", "session_checkpoint", "session_end", "session_unclean_end"];
+  const sessionEvents = [
+    "session_start",
+    "session_heartbeat",
+    "session_checkpoint",
+    "session_end",
+    "session_unclean_end",
+    "session_unclean_detected",
+    "surface_event",
+    ...PRODUCT_EVENT_NAMES,
+  ];
   const events = await db.select().from(telemetryEvents).where(and(
     eq(telemetryEvents.productId, productId),
     inArray(telemetryEvents.event, sessionEvents),
-    gte(telemetryEvents.receivedAt, `${start} 00:00:00`),
+    gte(telemetryEvents.receivedAt, `${addUtcDays(start, -1)} 00:00:00`),
     lte(telemetryEvents.receivedAt, `${end} 23:59:59`)
   )).orderBy(telemetryEvents.receivedAt).all();
   const rows = new Map<string, DailyDeviceActivity>();
@@ -1075,6 +1359,25 @@ async function loadDailyDeviceActivity(
   for (const event of events) {
     if (!event.installId) continue;
     const day = event.receivedAt.slice(0, 10);
+    if (day < start) {
+      if (event.sessionId && ["session_heartbeat", "session_checkpoint", "session_end", "session_unclean_end", "session_unclean_detected"].includes(event.event)) {
+        let payload: Record<string, unknown> = {};
+        try { payload = JSON.parse(event.payloadJson); } catch { /* Ignore malformed history. */ }
+        const process = safePayloadDuration(payload, "process_duration_secs");
+        const visibleKey = event.event === "session_checkpoint" || event.event === "session_unclean_end" || event.event === "session_unclean_detected"
+          ? "companion_visible_secs"
+          : "overlay_visible_secs";
+        const visible = safePayloadDuration(payload, visibleKey);
+        const previous = sessionDurations.get(event.sessionId) || { process: 0, visible: 0 };
+        if (process >= previous.process || visible >= previous.visible) {
+          sessionDurations.set(event.sessionId, {
+            process: Math.max(previous.process, process),
+            visible: Math.max(previous.visible, visible),
+          });
+        }
+      }
+      continue;
+    }
     const key = `${day}\u0000${event.installId}`;
     const row = rows.get(key) || {
       day,
@@ -1104,11 +1407,11 @@ async function loadDailyDeviceActivity(
       row.launches += 1;
       row.sessions += 1;
     }
-    if (event.sessionId && event.event !== "session_start") {
+    if (event.sessionId && ["session_heartbeat", "session_checkpoint", "session_end", "session_unclean_end", "session_unclean_detected"].includes(event.event)) {
       let payload: Record<string, unknown> = {};
       try { payload = JSON.parse(event.payloadJson); } catch { /* Ignore malformed history. */ }
       const process = safePayloadDuration(payload, "process_duration_secs");
-      const visibleKey = event.event === "session_checkpoint" || event.event === "session_unclean_end"
+      const visibleKey = event.event === "session_checkpoint" || event.event === "session_unclean_end" || event.event === "session_unclean_detected"
         ? "companion_visible_secs"
         : "overlay_visible_secs";
       const visible = safePayloadDuration(payload, visibleKey);
@@ -1171,6 +1474,41 @@ export async function getRetentionReport(
     return [offset, { devices: numerator, cohortDevices: denominator, ratePct: percentage(numerator, denominator) }];
   }));
   return { filters: { days, productId }, offsets, rows, summary };
+}
+
+async function loadLifetimeUsageByInstall(
+  db: Database,
+  productId: string,
+): Promise<Map<string, { activeSecs: number; overlayVisibleSecs: number }>> {
+  const events = await db.select().from(telemetryEvents).where(and(
+    eq(telemetryEvents.productId, productId),
+    inArray(telemetryEvents.event, ["session_start", "session_checkpoint", "session_heartbeat", "session_end", "session_unclean_end"]),
+  )).orderBy(telemetryEvents.receivedAt).all();
+  const sessionMax = new Map<string, { process: number; overlay: number; installId: string }>();
+  const result = new Map<string, { activeSecs: number; overlayVisibleSecs: number }>();
+  for (const event of events) {
+    if (!event.installId || !event.sessionId || event.event === "session_start") continue;
+    let payload: Record<string, unknown> = {};
+    try { payload = JSON.parse(event.payloadJson); } catch { /* Ignore malformed history. */ }
+    const process = safePayloadDuration(payload, "process_duration_secs");
+    const visible = safePayloadDuration(
+      payload,
+      event.event === "session_checkpoint" || event.event === "session_unclean_end"
+        ? "companion_visible_secs"
+        : "overlay_visible_secs",
+    );
+    const previous = sessionMax.get(event.sessionId) || { process: 0, overlay: 0, installId: event.installId };
+    const current = result.get(event.installId) || { activeSecs: 0, overlayVisibleSecs: 0 };
+    current.activeSecs += boundedDelta(process, previous.process);
+    current.overlayVisibleSecs += boundedDelta(visible, previous.overlay);
+    result.set(event.installId, current);
+    sessionMax.set(event.sessionId, {
+      process: Math.max(previous.process, process),
+      overlay: Math.max(previous.overlay, visible),
+      installId: event.installId,
+    });
+  }
+  return result;
 }
 
 export async function getStartupDiagnostics(

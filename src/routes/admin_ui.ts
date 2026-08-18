@@ -29,6 +29,9 @@ import {
   getTelemetryReport,
   getRetentionReport,
   getStartupDiagnostics,
+  getTelemetryInstallDetail,
+  getTelemetryMachineDetail,
+  listTelemetryUsers,
   listActiveDevicesForDay,
   listInstallationsForDay,
   listTelemetryEvents,
@@ -94,6 +97,7 @@ const navItems = [
   ["/admin/telemetry/startup", "启动诊断"],
   ["/admin/telemetry/retention", "留存分析"],
   ["/admin/telemetry/usage", "设备总览"],
+  ["/admin/telemetry/users", "用户总览"],
   ["/admin/telemetry/products", "行为漏斗"],
   ["/admin/telemetry/events", "原始事件"],
   ["/admin/logs", "日志"],
@@ -176,6 +180,7 @@ function reportTabs(active: string): string {
     ["/admin/telemetry/startup", "启动诊断"],
     ["/admin/telemetry/retention", "留存分析"],
     ["/admin/telemetry/usage", "设备总览"],
+    ["/admin/telemetry/users", "用户总览"],
     ["/admin/telemetry/products", "行为漏斗"],
     ["/admin/telemetry/events", "原始事件"],
   ];
@@ -647,7 +652,7 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
       .map((r) => `<tr><td>${e(r.day)}</td><td>${r.downloads}</td><td>${r.installs}</td><td>${r.activeMachines}</td><td>${r.launches}</td><td>${formatDuration(r.activeSecs)}</td><td>${formatDuration(r.overlayVisibleSecs)}</td><td>${r.events}</td></tr>`)
       .join("");
     const usageRows = machineUsage
-      .map((r) => `<tr><td><code>${e(shortId(r.machineHash))}</code></td><td>${e(r.firstSeenAt)}</td><td>${e(r.lastSeenAt)}</td><td class="num-cell">${r.activeDays}</td><td class="num-cell">${r.launches}</td><td class="num-cell">${r.sessions}</td><td class="num-cell">${e(formatDuration(r.activeSecs))}</td><td class="num-cell">${e(formatDuration(r.overlayVisibleSecs))}</td><td>${e(r.platform)}</td><td>${e(r.appVersion)}</td><td>${r.licenseStates.map((state) => badge(state)).join(" ") || badge("unknown")}</td></tr>`)
+      .map((r) => `<tr><td><a class="day-link" href="/admin/telemetry/user/${encodeURIComponent(r.machineHash)}?product_id=${encodeURIComponent(productId)}"><code>${e(shortId(r.machineHash))}</code></a></td><td>${e(r.firstSeenAt)}</td><td>${e(r.lastSeenAt)}</td><td class="num-cell">${r.activeDays}</td><td class="num-cell">${r.launches}</td><td class="num-cell">${r.sessions}</td><td class="num-cell">${e(formatDuration(r.activeSecs))}</td><td class="num-cell">${e(formatDuration(r.overlayVisibleSecs))}</td><td>${e(r.platform)}</td><td>${e(r.appVersion)}</td><td>${r.licenseStates.map((state) => badge(state)).join(" ") || badge("unknown")}</td></tr>`)
       .join("");
     const versionRows = report.versions
       .map((r) => `<tr><td>${e(r.appVersion)}</td><td>${r.activeMachines}</td><td>${r.launches}</td><td>${formatDuration(r.activeSecs)}</td></tr>`)
@@ -685,7 +690,7 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     const productId = c.req.query("product_id") || "animate";
     const result = await listInstallationsForDay(db, { day, productId, page: Number(c.req.query("page") || 1) });
     const actionFlag = (value: boolean) => value ? `<span class="badge active">是</span>` : `<span class="muted">否</span>`;
-    const rows = result.items.map((row) => `<tr><td class="identity">${e(shortId(row.installId))}</td><td>${e(row.firstInstalledAt)}</td><td>${actionFlag(row.freeModelClicked)}</td><td>${actionFlag(row.modelUploadSucceeded)}</td><td>${actionFlag(row.purchaseClicked)}</td><td>${e(row.appVersion)}</td><td>${e(row.platform)}</td><td>${e(row.channel)}</td><td>${badge(row.licenseState)}</td><td class="identity">${e(shortId(row.machineHash))}</td></tr>`).join("");
+    const rows = result.items.map((row) => `<tr><td class="identity"><a class="day-link" href="/admin/telemetry/install/${encodeURIComponent(row.installId)}?product_id=${encodeURIComponent(productId)}">${e(shortId(row.installId))}</a></td><td>${e(row.firstInstalledAt)}</td><td>${actionFlag(row.freeModelClicked)}</td><td>${actionFlag(row.modelUploadSucceeded)}</td><td>${actionFlag(row.purchaseClicked)}</td><td>${e(row.appVersion)}</td><td>${e(row.platform)}</td><td>${e(row.channel)}</td><td>${badge(row.licenseState)}</td><td class="identity">${e(shortId(row.machineHash))}</td></tr>`).join("");
     const content = `${reportTabs("/admin/telemetry/installs")}<div class="report-head"><div><a class="day-link" href="/admin/telemetry/installs">← 返回每日新增</a><h2 style="margin-top:10px">${e(day)} 新增用户</h2><p class="muted">首次安装当天的匿名用户行为明细，同一行为只标记一次</p></div></div><section class="report-section"><table><thead><tr><th>安装用户 ID</th><th>首次上报</th><th>获取免费模型</th><th>上传模型成功</th><th>去购买</th><th>版本</th><th>平台</th><th>渠道</th><th>授权状态</th><th>机器 Hash</th></tr></thead><tbody>${rows || `<tr><td colspan="10" class="muted">当天暂无新增安装</td></tr>`}</tbody></table>${devicePagination(`/admin/telemetry/installs/${day}`, { product_id: productId }, result.page, result.pageSize, result.total)}</section>`;
     return c.html(shell("安装设备明细", "/admin/telemetry/installs", `<div class="report-shell">${content}</div>`));
   });
@@ -707,9 +712,46 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     const day = validReportDay(c.req.param("day"));
     const productId = c.req.query("product_id") || "animate";
     const result = await listActiveDevicesForDay(db, { day, productId, page: Number(c.req.query("page") || 1) });
-    const rows = result.items.map((row) => `<tr><td class="identity">${e(shortId(row.installId))}</td><td class="duration"><b>${formatDeviceDuration(row.activeSecs)}</b></td><td class="duration">${formatDeviceDuration(row.overlayVisibleSecs)}</td><td>${row.launches}</td><td>${row.sessions}</td><td>${e(row.appVersion)}</td><td>${e(row.channel)}</td><td>${badge(row.licenseState)}</td><td>${e(row.lastActiveAt)}</td></tr>`).join("");
-    const content = `${reportTabs("/admin/telemetry/activity")}<div class="report-head"><div><a class="day-link" href="/admin/telemetry/activity">← 返回每日活跃</a><h2 style="margin-top:10px">${e(day)} 活跃设备</h2><p class="muted">按当日累计活跃时长从高到低排列</p></div></div><section class="report-section"><table><thead><tr><th>安装设备 ID</th><th>活跃时长</th><th>陪伴可见时长</th><th>启动</th><th>会话</th><th>版本</th><th>渠道</th><th>授权</th><th>最后活跃</th></tr></thead><tbody>${rows || `<tr><td colspan="9" class="muted">当天暂无活跃设备</td></tr>`}</tbody></table>${devicePagination(`/admin/telemetry/activity/${day}`, { product_id: productId }, result.page, result.pageSize, result.total)}</section>`;
+    const rows = result.items.map((row) => `<tr><td class="identity"><a class="day-link" href="/admin/telemetry/install/${encodeURIComponent(row.installId)}?product_id=${encodeURIComponent(productId)}">${e(shortId(row.installId))}</a></td><td>${e(row.firstInstalledAt || "-")}</td><td class="duration"><b>${formatDeviceDuration(row.activeSecs)}</b></td><td class="duration">${formatDeviceDuration(row.lifetimeActiveSecs)}</td><td class="duration">${formatDeviceDuration(row.overlayVisibleSecs)}</td><td class="duration">${formatDeviceDuration(row.lifetimeOverlayVisibleSecs)}</td><td>${row.launches}</td><td>${row.sessions}</td><td>${e(row.appVersion)}</td><td>${e(row.channel)}</td><td>${badge(row.licenseState)}</td><td>${e(row.lastActiveAt)}</td></tr>`).join("");
+    const content = `${reportTabs("/admin/telemetry/activity")}<div class="report-head"><div><a class="day-link" href="/admin/telemetry/activity">← 返回每日活跃</a><h2 style="margin-top:10px">${e(day)} 活跃设备</h2><p class="muted">按当日累计活跃时长从高到低排列；历史累计为当前可重建的 session 时长</p></div></div><section class="report-section"><div class="table-scroll"><table><thead><tr><th>安装设备 ID</th><th>安装日期</th><th>当天使用时长</th><th>历史累计时长</th><th>当天陪伴可见</th><th>历史陪伴可见</th><th>启动</th><th>会话</th><th>版本</th><th>渠道</th><th>授权</th><th>最后活跃</th></tr></thead><tbody>${rows || `<tr><td colspan="12" class="muted">当天暂无活跃设备</td></tr>`}</tbody></table></div>${devicePagination(`/admin/telemetry/activity/${day}`, { product_id: productId }, result.page, result.pageSize, result.total)}</section>`;
     return c.html(shell("活跃设备明细", "/admin/telemetry/activity", `<div class="report-shell">${content}</div>`));
+  });
+
+  router.get("/telemetry/users", async (c) => {
+    const productId = c.req.query("product_id") || "animate";
+    const page = Number(c.req.query("page") || 1);
+    const q = c.req.query("q") || undefined;
+    const status = c.req.query("status") || undefined;
+    const platform = c.req.query("platform") || undefined;
+    const sort = (c.req.query("sort") as "last_seen" | "first_seen" | "active_secs" | undefined) || "last_seen";
+    const result = await listTelemetryUsers(db, { productId, page, q, status, platform, sort, pageSize: 50 });
+    const statusLabel: Record<string, string> = { active: "活跃", recently_offline: "最近离线", likely_abandoned: "疑似流失", likely_uninstalled: "疑似卸载" };
+    const rows = result.items.map((row) => `<tr><td class="identity"><a class="day-link" href="/admin/telemetry/user/${encodeURIComponent(row.machineHash)}?product_id=${encodeURIComponent(productId)}">${e(shortId(row.machineHash))}</a></td><td>${e(row.firstInstallAt || row.firstSeenAt)}</td><td>${e(row.lastSeenAt)}</td><td>${badge(statusLabel[row.status] || row.status)}</td><td class="duration"><b>${formatDeviceDuration(row.activeSecs)}</b></td><td class="duration">${formatDeviceDuration(row.recentSessionSecs)}</td><td>${row.installs}</td><td>${row.launches}</td><td>${row.sessions}</td><td>${row.events}</td><td>${e(row.lastEvent)}</td><td>${e(row.appVersion)}</td><td>${e(row.platform)}</td></tr>`).join("");
+    const params: Record<string, string | number> = { product_id: productId, sort };
+    if (q) params.q = q;
+    if (status) params.status = status;
+    if (platform) params.platform = platform;
+    const content = `${reportTabs("/admin/telemetry/users")}<div class="report-head"><div><h2>用户总览</h2><p class="muted">以 machine_hash 作为唯一用户；按最后活跃时间展示，可进入用户详情时间线</p></div></div><form method="get" class="toolbar"><input type="hidden" name="product_id" value="${e(productId)}"><label style="width:230px">Machine Hash<input name="q" value="${e(q || "")}" placeholder="输入完整或部分 hash"></label><label style="width:150px">状态<select name="status"><option value="">全部状态</option>${Object.entries(statusLabel).map(([value, label]) => `<option value="${value}" ${status === value ? "selected" : ""}>${label}</option>`).join("")}</select></label><label style="width:140px">平台<input name="platform" value="${e(platform || "")}" placeholder="windows"></label><label style="width:150px">排序<select name="sort"><option value="last_seen" ${sort === "last_seen" ? "selected" : ""}>最近活跃</option><option value="first_seen" ${sort === "first_seen" ? "selected" : ""}>首次出现</option><option value="active_secs" ${sort === "active_secs" ? "selected" : ""}>累计时长</option></select></label><button class="primary">筛选</button><a class="btn quiet" href="/admin/telemetry/users?product_id=${encodeURIComponent(productId)}">清除</a></form><section class="report-section"><div class="section-head"><h3>用户列表</h3><span>共 ${result.total} 个 machine_hash 用户，第 ${result.page} 页</span></div><div class="table-scroll"><table><thead><tr><th>用户</th><th>首次安装/出现</th><th>最后活跃</th><th>状态</th><th>累计活跃时长</th><th>最近一次时长</th><th>安装数</th><th>启动</th><th>会话</th><th>事件</th><th>最后事件</th><th>版本</th><th>平台</th></tr></thead><tbody>${rows || `<tr><td colspan="13" class="muted">暂无匹配用户</td></tr>`}</tbody></table></div>${devicePagination("/admin/telemetry/users", params, result.page, result.pageSize, result.total)}</section>`;
+    return c.html(shell("用户总览", "/admin/telemetry/users", `<div class="report-shell">${content}</div>`));
+  });
+
+  router.get("/telemetry/user/:machineHash", async (c) => {
+    const machineHash = c.req.param("machineHash");
+    const productId = c.req.query("product_id") || "animate";
+    const page = Number(c.req.query("page") || 1);
+    const event = c.req.query("event") || undefined;
+    const sessionId = c.req.query("session_id") || undefined;
+    const detail = await getTelemetryMachineDetail(db, { machineHash, productId, page, event, sessionId, pageSize: 100 });
+    const user = detail.user;
+    const rows = detail.events.map((row) => `<tr><td>${e(row.receivedAt)}</td><td><b>${e(row.event)}</b></td><td>${e(row.appVersion || "-")}</td><td>${e(shortId(row.installId))}</td><td>${e(shortId(row.sessionId))}</td><td>${badge(row.licenseState || "unknown")}</td><td>${e(payloadSummary(row.payloadJson))}</td></tr>`).join("");
+    const eventOptions = ["install_seen", "session_start", "session_checkpoint", "session_heartbeat", "session_end", "session_unclean_end", "session_unclean_detected", "first_frame_rendered", "surface_event", "avatar_interaction", "dance_started", "chat_opened", "model_import_completed", "model_import_failed", "purchase_clicked"];
+    const filters = `<form method="get" class="toolbar"><input type="hidden" name="product_id" value="${e(productId)}"><label style="width:210px">事件<select name="event"><option value="">全部事件</option>${eventOptions.map((value) => `<option value="${e(value)}" ${event === value ? "selected" : ""}>${e(value)}</option>`).join("")}</select></label><label style="width:280px">Session ID<input name="session_id" value="${e(sessionId || "")}" placeholder="可选"></label><button class="primary">筛选</button><a class="btn quiet" href="/admin/telemetry/user/${encodeURIComponent(machineHash)}?product_id=${encodeURIComponent(productId)}">清除</a></form>`;
+    const summary = user ? `<div class="metric-strip"><div class="metric"><div class="metric-label">状态</div><div class="metric-value" style="font-size:18px">${badge(user.status)}</div></div><div class="metric"><div class="metric-label">累计活跃时长</div><div class="metric-value">${formatDeviceDuration(user.activeSecs)}</div></div><div class="metric"><div class="metric-label">最近一次时长</div><div class="metric-value">${formatDeviceDuration(user.recentSessionSecs)}</div><div class="muted">${e(user.recentSessionAt || "-")}</div></div><div class="metric"><div class="metric-label">安装 / 启动 / 会话</div><div class="metric-value">${user.installs} / ${user.launches} / ${user.sessions}</div></div><div class="metric"><div class="metric-label">最后事件</div><div class="metric-value" style="font-size:16px">${e(user.lastEvent)}</div></div></div><section class="card"><h3 style="margin-top:0">用户信息</h3><div class="form-grid"><div><span class="muted">Machine Hash</span><br><code>${e(user.machineHash)}</code></div><div><span class="muted">首次安装/出现</span><br>${e(user.firstInstallAt || user.firstSeenAt)}</div><div><span class="muted">最后活跃</span><br>${e(user.lastSeenAt)}</div><div><span class="muted">版本 / 平台 / 渠道</span><br>${e(user.appVersion)} / ${e(user.platform)} / ${e(user.channel)}</div><div><span class="muted">事件总数</span><br>${user.events}</div><div><span class="muted">授权状态</span><br>${user.licenseStates.map((state) => badge(state)).join(" ") || badge("unknown")}</div></div></section>` : `<div class="flash flash-err">没有找到该 machine_hash 的事件</div>`;
+    const params: Record<string, string | number> = { product_id: productId };
+    if (event) params.event = event;
+    if (sessionId) params.session_id = sessionId;
+    const content = `${reportTabs("/admin/telemetry/users")}<div class="report-head"><div><a class="day-link" href="/admin/telemetry/users">← 返回用户总览</a><h2 style="margin-top:10px">用户详细行为</h2><p class="muted">按 machine_hash 聚合，事件按时间顺序排列</p></div></div>${summary}${filters}<section class="report-section"><div class="section-head"><h3>用户事件时间线</h3><span>共 ${detail.total} 条，第 ${detail.page} 页</span></div><div class="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>版本</th><th>安装 ID</th><th>Session</th><th>授权</th><th>Payload</th></tr></thead><tbody>${rows || `<tr><td colspan="7" class="muted">没有匹配事件</td></tr>`}</tbody></table></div>${devicePagination(`/admin/telemetry/user/${encodeURIComponent(machineHash)}`, params, detail.page, detail.pageSize, detail.total)}</section>`;
+    return c.html(shell("用户详细行为", "/admin/telemetry/users", `<div class="report-shell">${content}</div>`));
   });
 
   router.get("/telemetry/startup", async (c) => {
@@ -750,6 +792,31 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     return c.html(shell("留存分析", "/admin/telemetry/retention", `<div class="report-shell">${content}</div>`));
   });
 
+  router.get("/telemetry/install/:installId", async (c) => {
+    const installId = c.req.param("installId");
+    const productId = c.req.query("product_id") || "animate";
+    const page = Number(c.req.query("page") || 1);
+    const event = c.req.query("event") || undefined;
+    const surface = c.req.query("surface") || undefined;
+    const sessionId = c.req.query("session_id") || undefined;
+    const detail = await getTelemetryInstallDetail(db, { installId, productId, page, event, surface, sessionId, pageSize: 100 });
+    const eventRows = detail.events.map((row) => {
+      const payload = payloadSummary(row.payloadJson);
+      return `<tr><td>${e(row.receivedAt)}</td><td><b>${e(row.event)}</b></td><td>${e(row.appVersion || "-")}</td><td>${e(row.platform || "-")}</td><td>${e(shortId(row.sessionId))}</td><td>${badge(row.licenseState || "unknown")}</td><td>${e(payload)}</td></tr>`;
+    }).join("");
+    const queryParams: Record<string, string | number> = { product_id: productId };
+    if (event) queryParams.event = event;
+    if (surface) queryParams.surface = surface;
+    if (sessionId) queryParams.session_id = sessionId;
+    const eventOptions = ["install_seen", "session_start", "session_checkpoint", "session_heartbeat", "session_end", "session_unclean_detected", "first_frame_rendered", "surface_event", "avatar_interaction", "dance_started", "chat_opened", "model_import_completed", "model_import_failed", "purchase_clicked"];
+    const filters = `<form method="get" class="toolbar"><input type="hidden" name="product_id" value="${e(productId)}"><label style="width:180px">事件<select name="event"><option value="">全部事件</option>${eventOptions.map((value) => `<option value="${e(value)}" ${event === value ? "selected" : ""}>${e(value)}</option>`).join("")}</select></label><label style="width:150px">Surface<select name="surface"><option value="">全部 Surface</option>${["overlay", "workshop", "settings", "dance_studio"].map((value) => `<option value="${value}" ${surface === value ? "selected" : ""}>${value}</option>`).join("")}</select></label><label style="width:260px">Session ID<input name="session_id" value="${e(sessionId || "")}" placeholder="可选，精确筛选"></label><button class="primary">筛选</button><a class="btn quiet" href="/admin/telemetry/install/${encodeURIComponent(installId)}?product_id=${encodeURIComponent(productId)}">清除</a></form>`;
+    const summary = `<div class="metric-strip"><div class="metric"><div class="metric-label">安装 ID</div><div class="metric-value" style="font-size:16px;word-break:break-all">${e(shortId(detail.installId))}</div><div class="muted">${e(detail.firstSeenAt || "-")}</div></div><div class="metric"><div class="metric-label">历史进程时长</div><div class="metric-value">${formatDeviceDuration(detail.activeSecs)}</div></div><div class="metric"><div class="metric-label">启动 / 会话</div><div class="metric-value">${detail.launches} / ${detail.sessions}</div></div><div class="metric"><div class="metric-label">关键行为</div><div class="metric-value">Workshop ${detail.workshopOpens} · Settings ${detail.settingsOpens}</div></div><div class="metric"><div class="metric-label">退出状态</div><div class="metric-value">${detail.cleanExits} 正常 / ${detail.uncleanExits} 异常</div></div></div>`;
+    const identity = `<section class="card"><h3 style="margin-top:0">用户身份与生命周期</h3><div class="form-grid"><div><span class="muted">安装 ID</span><br><code>${e(detail.installId)}</code></div><div><span class="muted">机器 Hash</span><br><code>${e(detail.machineHash || "-")}</code></div><div><span class="muted">平台 / 渠道</span><br>${e(detail.platform)} / ${e(detail.channel)}</div><div><span class="muted">版本</span><br>${e(detail.appVersion)}</div><div><span class="muted">首次事件</span><br>${e(detail.firstSeenAt || "-")}</div><div><span class="muted">最后事件</span><br>${e(detail.lastSeenAt || "-")}</div><div><span class="muted">首帧</span><br>${detail.firstFrame ? badge("ok") : badge("not_seen")}</div><div><span class="muted">授权状态</span><br>${detail.licenseStates.map((state) => badge(state)).join(" ") || badge("unknown")}</div></div></section>`;
+    const paginationView = devicePagination(`/admin/telemetry/install/${encodeURIComponent(installId)}`, queryParams, page, 100, detail.totalFilteredEvents);
+    const content = `${reportTabs("/admin/telemetry/events")}<div class="report-head"><div><a class="day-link" href="/admin/telemetry/installs">← 返回新增安装</a><h2 style="margin-top:10px">用户行为详情</h2><p class="muted">按事件发生顺序展示；v1 事件使用服务端接收时间作为降级时间</p></div></div>${summary}${identity}${filters}<section class="report-section"><div class="section-head"><h3>时间线事件</h3><span>共 ${detail.totalFilteredEvents} 条，当前第 ${page} 页</span></div><div class="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>版本</th><th>平台</th><th>Session</th><th>授权</th><th>Payload</th></tr></thead><tbody>${eventRows || `<tr><td colspan="7" class="muted">没有匹配事件</td></tr>`}</tbody></table></div>${paginationView}</section>`;
+    return c.html(shell("用户行为详情", "/admin/telemetry/events", `<div class="report-shell">${content}</div>`));
+  });
+
   router.get("/telemetry/events", async (c) => {
     const page = Number(c.req.query("page") || 1);
     const params = {
@@ -763,7 +830,7 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     };
     const result = await listTelemetryEvents(db, params);
     const rows = result.items
-      .map((x) => `<tr><td>${e(x.receivedAt)}</td><td>${e(x.event)}</td><td>${e(x.productId)}</td><td>${e(x.appVersion || "-")}</td><td>${e(x.platform || "-")}</td><td>${e(x.sourceId)}</td><td>${badge(x.licenseState || "unknown")}</td><td><code>${e(shortId(x.machineHash))}</code></td><td><code>${e(shortId(x.installId))}</code></td><td><code>${e(shortId(x.sessionId))}</code></td><td>${e(payloadSummary(x.payloadJson))}</td></tr>`)
+      .map((x) => `<tr><td>${e(x.receivedAt)}</td><td>${e(x.event)}</td><td>${e(x.productId)}</td><td>${e(x.appVersion || "-")}</td><td>${e(x.platform || "-")}</td><td>${e(x.sourceId)}</td><td>${badge(x.licenseState || "unknown")}</td><td><code>${e(shortId(x.machineHash))}</code></td><td>${x.installId ? `<a class="day-link" href="/admin/telemetry/install/${encodeURIComponent(x.installId)}?product_id=${encodeURIComponent(x.productId)}"><code>${e(shortId(x.installId))}</code></a>` : `<code>-</code>`}</td><td><code>${e(shortId(x.sessionId))}</code></td><td>${e(payloadSummary(x.payloadJson))}</td></tr>`)
       .join("");
     return c.html(shell("原始事件", "/admin/telemetry/events", `<div class="report-shell">${reportTabs("/admin/telemetry/events")}<div class="toolbar"><form method="get" class="actions"><input name="event" value="${e(params.event || "")}" placeholder="event" style="width:150px"><input name="product_id" value="${e(params.productId || "")}" placeholder="product_id" style="width:130px"><input name="machine_hash" value="${e(params.machineHash || "")}" placeholder="machine hash" style="width:180px"><input name="install_id" value="${e(params.installId || "")}" placeholder="install_id" style="width:180px"><input name="session_id" value="${e(params.sessionId || "")}" placeholder="session_id" style="width:180px"><button>筛选</button></form></div><div class="report-section"><table><thead><tr><th>接收时间</th><th>事件</th><th>产品</th><th>版本</th><th>平台</th><th>来源</th><th>授权</th><th>机器</th><th>安装</th><th>会话</th><th>Payload</th></tr></thead><tbody>${rows || `<tr><td colspan="11" class="muted">暂无事件</td></tr>`}</tbody></table><div class="pagination"><span class="muted">共 ${result.total} 条，当前第 ${page} 页</span></div></div></div>`));
   });
