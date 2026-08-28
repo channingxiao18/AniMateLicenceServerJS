@@ -21,6 +21,7 @@ import {
 } from "../services/activation";
 import { formatPlanFeatures } from "../services/plan_features";
 import { listTrialGrants } from "../services/trial";
+import { listFeedback } from "../services/feedback";
 import {
   getActivityDays,
   getInstallationDays,
@@ -100,6 +101,7 @@ const navItems = [
   ["/admin/telemetry/users", "用户总览"],
   ["/admin/telemetry/products", "行为漏斗"],
   ["/admin/telemetry/events", "原始事件"],
+  ["/admin/feedback", "用户反馈"],
   ["/admin/logs", "日志"],
 ];
 
@@ -667,6 +669,25 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     const dailyTable = `<div class="table-card"><div class="table-caption"><div><h2>每日趋势</h2><p>活跃机器为当天去重的匿名设备数。</p></div></div><div class="table-scroll"><table><thead><tr><th>日期</th><th>下载</th><th>安装</th><th>活跃机器</th><th>启动</th><th>运行时长</th><th>Overlay 时长</th><th>事件</th></tr></thead><tbody>${dailyRows || `<tr><td colspan="8" class="muted">暂无数据</td></tr>`}</tbody></table></div></div>`;
     const usageTable = `<div class="table-card"><div class="table-caption"><div><h2>设备使用明细</h2><p>按匿名设备汇总，不包含可识别个人信息；按总运行时长排序。</p></div><span class="muted">${machineUsage.length} 台设备</span></div><div class="table-scroll"><table><thead><tr><th>设备</th><th>首次活跃</th><th>最后活跃</th><th>活跃天数</th><th>启动</th><th>会话</th><th>运行时长</th><th>Overlay 时长</th><th>平台</th><th>版本</th><th>授权状态</th></tr></thead><tbody>${usageRows || `<tr><td colspan="11" class="muted">暂无会话数据</td></tr>`}</tbody></table></div></div>`;
     return c.html(shell("设备总览", "/admin/telemetry/usage", `<div class="report-shell">${reportTabs("/admin/telemetry/usage")}<div class="toolbar"><form method="get" class="actions"><label style="width:130px">产品<input name="product_id" value="${e(productId)}"></label><label style="width:150px">统计周期<select name="days">${dayOptions}</select></label><button class="primary">刷新统计</button></form><a class="btn" href="/admin/telemetry/events">查看原始事件</a></div><div class="grid stats">${cards}</div>${dailyTable}${usageTable}<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-top:14px"><div class="table-card"><div class="table-caption"><h3>版本分布</h3></div><table><thead><tr><th>版本</th><th>活跃机器</th><th>启动</th><th>运行时长</th></tr></thead><tbody>${versionRows || `<tr><td colspan="4" class="muted">暂无数据</td></tr>`}</tbody></table></div><div class="table-card"><div class="table-caption"><h3>授权状态</h3></div><table><thead><tr><th>状态</th><th>活跃机器</th><th>启动</th></tr></thead><tbody>${stateRows || `<tr><td colspan="3" class="muted">暂无数据</td></tr>`}</tbody></table></div><div class="table-card"><div class="table-caption"><h3>平台分布</h3></div><table><thead><tr><th>平台</th><th>活跃机器</th><th>安装</th><th>下载</th></tr></thead><tbody>${platformRows || `<tr><td colspan="4" class="muted">暂无数据</td></tr>`}</tbody></table></div></div></div>`));
+  });
+
+  router.get("/feedback", async (c) => {
+    const pageSize = 50;
+    const from = c.req.query("from") || "";
+    const to = c.req.query("to") || "";
+    const requestedPage = Math.max(1, Number(c.req.query("page") || 1));
+    const result = await listFeedback(db, { page: requestedPage, pageSize, from: from || undefined, to: to || undefined });
+    const lastPage = Math.max(1, Math.ceil(result.total / pageSize));
+    const page = Math.min(requestedPage, lastPage);
+    const pageResult = page === result.page
+      ? result
+      : await listFeedback(db, { page, pageSize, from: from || undefined, to: to || undefined });
+    const rows = pageResult.items.map((item) => `<tr><td class="num-cell">${e(item.createdAt)}</td><td style="white-space:pre-wrap;min-width:280px;max-width:520px">${e(item.message)}</td><td>${e(item.contact || "-")}</td><td>${e(item.locale || "-")}</td><td>${e(item.appVersion || "-")}</td><td>${e(item.channel)}</td><td><code>${e(shortId(item.machineHash))}</code></td><td>${e(item.ipAddress || "-")}</td></tr>`).join("");
+    const params: Record<string, string> = {};
+    if (from) params.from = from;
+    if (to) params.to = to;
+    const content = `<div class="toolbar"><form method="get" class="actions"><label style="width:160px">开始日期<input type="date" name="from" value="${e(from)}"></label><label style="width:160px">结束日期<input type="date" name="to" value="${e(to)}"></label><button class="primary">筛选</button><a class="btn quiet" href="/admin/feedback">清除</a></form><span class="muted">共 ${pageResult.total} 条反馈</span></div><div class="table-card"><div class="table-caption"><div><h2>用户反馈</h2><p>来自应用内评分/反馈窗口的提交记录，按最新提交时间倒序。</p></div></div><div class="table-scroll"><table style="min-width:1180px"><thead><tr><th>提交时间</th><th>反馈内容</th><th>联系方式</th><th>语言</th><th>版本</th><th>渠道</th><th>机器码</th><th>IP（审计）</th></tr></thead><tbody>${rows || `<tr><td colspan="8" class="muted">暂无反馈</td></tr>`}</tbody></table></div></div>${pagination("/admin/feedback", page, pageResult.total, pageSize, params)}`;
+    return c.html(shell("用户反馈", "/admin/feedback", content));
   });
 
   router.get("/telemetry/reports", (c) => c.redirect("/admin/telemetry/installs"));

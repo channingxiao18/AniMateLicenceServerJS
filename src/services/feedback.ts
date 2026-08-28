@@ -1,6 +1,6 @@
 import type { Database } from "../db/index";
 import { feedbackSubmissions } from "../db/schema";
-import { and, eq, gte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 
 const MAX_MESSAGE_CHARS = 500;
 const MAX_CONTACT_CHARS = 120;
@@ -136,6 +136,45 @@ export async function feedbackCountForMachine(db: Database, machineHash: string)
     )
     .get();
   return Number(row?.count || 0);
+}
+
+export type FeedbackListParams = {
+  page?: number;
+  pageSize?: number;
+  from?: string;
+  to?: string;
+};
+
+export async function listFeedback(
+  db: Database,
+  params: FeedbackListParams = {}
+): Promise<{
+  items: Array<typeof feedbackSubmissions.$inferSelect>;
+  total: number;
+  page: number;
+  pageSize: number;
+}> {
+  const pageSize = Math.min(100, Math.max(1, Math.floor(params.pageSize || 50)));
+  const page = Math.max(1, Math.floor(params.page || 1));
+  const conditions = [];
+  if (params.from) conditions.push(gte(feedbackSubmissions.createdAt, `${params.from} 00:00:00`));
+  if (params.to) conditions.push(lte(feedbackSubmissions.createdAt, `${params.to} 23:59:59`));
+  const where = conditions.length ? and(...conditions) : undefined;
+  const countRow = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(feedbackSubmissions)
+    .where(where)
+    .get();
+  const total = Number(countRow?.count || 0);
+  const items = await db
+    .select()
+    .from(feedbackSubmissions)
+    .where(where)
+    .orderBy(desc(feedbackSubmissions.createdAt), desc(feedbackSubmissions.id))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize)
+    .all();
+  return { items, total, page, pageSize };
 }
 
 export const feedbackLimits = {
