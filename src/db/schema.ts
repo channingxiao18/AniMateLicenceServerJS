@@ -354,3 +354,31 @@ export const telemetryDailyUniques = sqliteTable(
     ),
   })
 );
+
+// User-submitted feedback from in-app prompts and other client surfaces.
+// Kept separate from telemetry because feedback may contain user-provided
+// contact details and free-form text.
+export const feedbackSubmissions = sqliteTable(
+  "feedback_submissions",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    source: text("source").notNull(),
+    message: text("message").notNull(),
+    contact: text("contact"),
+    appVersion: text("app_version"),
+    locale: text("locale"),
+    platform: text("platform").notNull(),
+    channel: text("channel").notNull(),
+    clientTimeMs: integer("client_time_ms"),
+    machineHash: text("machine_hash"),
+    ipAddress: text("ip_address"),
+    userAgent: text("user_agent"),
+    createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => ({
+    createdIdx: index("feedback_submissions_created_idx").on(table.createdAt),
+    sourceIdx: index("feedback_submissions_source_idx").on(table.source, table.createdAt),
+    machineIdx: index("feedback_submissions_machine_idx").on(table.machineHash, table.createdAt),
+    ipIdx: index("feedback_submissions_ip_idx").on(table.ipAddress, table.createdAt),
+  })
+);

@@ -21,6 +21,7 @@ import { recordTelemetryEvent, TelemetryError } from "../services/telemetry";
 import { startTrial } from "../services/trial";
 import { products } from "../db/schema";
 import { eq } from "drizzle-orm";
+import { FeedbackError, feedbackCountForMachine, recordFeedback, validateFeedbackBody } from "../services/feedback";
 
 type ClientBody = {
   product_id?: string;
@@ -199,6 +200,56 @@ export function createV1Router(db: Database, config: AppConfig, registry: Provid
         return c.json({ error: err.error, message: err.message }, telemetryStatusFor(err));
       }
       console.error("Telemetry error:", err);
+      return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
+    }
+  });
+
+  router.post("/feedback", async (c) => {
+    const ip =
+      c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
+      c.req.header("x-real-ip") ||
+      "unknown";
+
+    // Keep this endpoint intentionally small; it is called by the native Rust
+    // client, but the same guard also protects accidental browser submissions.
+    const contentType = c.req.header("content-type") || "";
+    if (!contentType.toLowerCase().includes("application/json")) {
+      return c.json({ error: "UNSUPPORTED_MEDIA_TYPE", message: "只接受 JSON 请求" }, 400);
+    }
+    const contentLength = Number(c.req.header("content-length") || 0);
+    if (contentLength > 16_384) {
+      return c.json({ error: "PAYLOAD_TOO_LARGE", message: "请求体超过 16KB" }, 413);
+    }
+
+    let body: unknown;
+    try {
+      const text = await c.req.text();
+      if (text.length > 16_384) {
+        return c.json({ error: "PAYLOAD_TOO_LARGE", message: "请求体超过 16KB" }, 413);
+      }
+      body = JSON.parse(text);
+    } catch {
+      return c.json({ error: "INVALID_JSON", message: "请求体格式无效" }, 400);
+    }
+
+    try {
+      // Server-side quota is keyed by the same stable, salted machine hash used
+      // by telemetry, never by IP (which is shared and changes frequently).
+      const validated = validateFeedbackBody(body);
+      if ((await feedbackCountForMachine(db, validated.machineHash)) >= 3) {
+        return c.json({ status: "limitReached" });
+      }
+      return c.json(
+        await recordFeedback(db, body, {
+          ipAddress: ip,
+          userAgent: c.req.header("user-agent") || null,
+        })
+      );
+    } catch (err) {
+      if (err instanceof FeedbackError) {
+        return c.json({ error: err.error, message: err.message }, err.statusCode);
+      }
+      console.error("Feedback error:", err);
       return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
     }
   });

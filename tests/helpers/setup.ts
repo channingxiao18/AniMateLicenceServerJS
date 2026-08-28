@@ -266,6 +266,26 @@ CREATE TABLE IF NOT EXISTS telemetry_daily_uniques (
   PRIMARY KEY (day, product_id, unique_type, unique_value)
 );
 CREATE INDEX IF NOT EXISTS telemetry_daily_uniques_report_idx ON telemetry_daily_uniques (day, product_id, unique_type, source_id, platform, channel, app_version, license_state);
+
+CREATE TABLE IF NOT EXISTS feedback_submissions (
+  id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+  source text NOT NULL,
+  message text NOT NULL,
+  contact text,
+  app_version text,
+  locale text,
+  platform text NOT NULL,
+  channel text NOT NULL,
+  client_time_ms integer,
+  machine_hash text,
+  ip_address text,
+  user_agent text,
+  created_at text DEFAULT (datetime('now')) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS feedback_submissions_created_idx ON feedback_submissions (created_at);
+CREATE INDEX IF NOT EXISTS feedback_submissions_source_idx ON feedback_submissions (source, created_at);
+CREATE INDEX IF NOT EXISTS feedback_submissions_machine_idx ON feedback_submissions (machine_hash, created_at);
+CREATE INDEX IF NOT EXISTS feedback_submissions_ip_idx ON feedback_submissions (ip_address, created_at);
 `;
 
 export function createTestDb(): { sqlite: Database.Database; db: AppDb } {
