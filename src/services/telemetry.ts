@@ -51,6 +51,10 @@ const EVENT_NAMES = new Set([
   "dance_started",
   "chat_opened",
   "relaunch_focused",
+  "main_window_navigated",
+  "onboarding_started",
+  "onboarding_step",
+  "onboarding_completed",
 ]);
 
 const LICENSE_STATES = new Set([
