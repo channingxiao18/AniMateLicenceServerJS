@@ -50,6 +50,7 @@ const EVENT_NAMES = new Set([
   "avatar_interaction",
   "dance_started",
   "chat_opened",
+  "relaunch_focused",
 ]);
 
 const LICENSE_STATES = new Set([
