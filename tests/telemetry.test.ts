@@ -7,6 +7,7 @@ import {
   getProductAnalyticsReport,
   getRetentionReport,
   getStartupDiagnostics,
+  getTelemetryInstallDetail,
   getTelemetryReport,
   listActiveDevicesForDay,
   listInstallationsForDay,
@@ -407,5 +408,66 @@ describe("telemetry", () => {
     const report = await getStartupDiagnostics(env.db, { day: "2026-08-15", productId: "animate" });
     expect(report.rows).toHaveLength(1);
     expect(report.rows[0]).toMatchObject({ processSecs: 90, diagnosis: "no_1m_checkpoint" });
+  });
+});
+
+describe("telemetry unclean session reporting", () => {
+  it("records session_unclean_end and attributes durations to the crashed session", async () => {
+    const env = await createTestEnv();
+    const crashedSessionId = "67676767-6767-4676-8676-676767676767";
+    const installId = "78787878-7878-4787-8787-787878787878";
+    const base = event({ install_id: installId, session_id: crashedSessionId });
+    const receivedAt = new Date("2026-08-15T10:00:00.000Z");
+
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "89898989-8989-4898-8898-898989898989",
+      event: "session_start",
+      payload: { started_at: Math.floor(receivedAt.getTime() / 1000) },
+    }, receivedAt);
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "9a9a9a9a-9a9a-49a9-8a9a-9a9a9a9a9a9a",
+      event: "session_unclean_end",
+      payload: {
+        started_at: Math.floor(receivedAt.getTime() / 1000),
+        process_duration_secs: 1800,
+        companion_visible_secs: 1200,
+        workshop_visible_secs: 300,
+        last_startup_stage: "model_load_started",
+        last_checkpoint_at: Math.floor(receivedAt.getTime() / 1000) + 1740,
+      },
+    }, new Date(receivedAt.getTime() + 86400000));
+
+    const rows = await env.db.select().from(telemetryEvents).all();
+    expect(rows.filter((row) => row.event === "session_unclean_end")).toHaveLength(1);
+
+    const detail = await getTelemetryInstallDetail(env.db, { installId });
+    expect(detail.uncleanExits).toBe(1);
+    expect(detail.cleanExits).toBe(0);
+    expect(detail.activeSecs).toBe(1800);
+    expect(detail.overlayVisibleSecs).toBe(1200);
+  });
+
+  it("accepts events the desktop client sends that were previously rejected", async () => {
+    const env = await createTestEnv();
+    const base = event();
+    const previouslyRejected = [
+      "frontend_bootstrap_started",
+      "free_llm_credits_clicked",
+      "free_asr_credits_clicked",
+      "free_tts_credits_clicked",
+    ];
+    for (const [index, eventName] of previouslyRejected.entries()) {
+      const result = await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+        ...base,
+        event_id: `aaaaaaaa-aaaa-4aaa-8aaa-00000000000${index}`,
+        event: eventName,
+        payload: { surface: "test" },
+      });
+      expect(result).toEqual({ ok: true });
+    }
+    const rows = await env.db.select().from(telemetryEvents).all();
+    expect(rows).toHaveLength(4);
   });
 });
