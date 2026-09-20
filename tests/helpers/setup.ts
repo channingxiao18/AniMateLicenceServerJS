@@ -99,7 +99,8 @@ CREATE TABLE IF NOT EXISTS activations (
   last_refresh_at text,
   last_seen_at text,
   deactivated_at text,
-  metadata_json text
+  metadata_json text,
+  telemetry_machine_hash text
 );
 CREATE UNIQUE INDEX IF NOT EXISTS activations_entitlement_fingerprint_unique ON activations (entitlement_id, fingerprint);
 
@@ -184,6 +185,7 @@ CREATE TABLE IF NOT EXISTS trial_grants (
   app_version text,
   platform text,
   ip_hash text,
+  telemetry_machine_hash text,
   created_at text DEFAULT (datetime('now')) NOT NULL,
   updated_at text DEFAULT (datetime('now')) NOT NULL
 );

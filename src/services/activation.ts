@@ -188,6 +188,30 @@ function cleanMachineValue(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+/**
+ * `sha256("animate-telemetry-v1:" + product_uuid)` — byte-for-byte the value
+ * the client sends as telemetry `machine_hash`. Persisting it on trial grants
+ * and activations is what lets paid/trial machines be joined to their behaviour
+ * stream (AniMate repo: docs/product/telemetry-plan.md, G-8).
+ *
+ * Best-effort: legacy/opaque fingerprints simply yield null.
+ */
+export async function telemetryMachineHashFromFingerprint(
+  fingerprint: string
+): Promise<string | null> {
+  try {
+    const identity = await machineIdentityFromFingerprint(fingerprint);
+    if (!identity || identity.kind !== "uuid") return null;
+    const digest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(`animate-telemetry-v1:${identity.value}`)
+    );
+    return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return null;
+  }
+}
+
 export async function machineIdentityFromFingerprint(
   fingerprint: string
 ): Promise<MachineIdentity | null> {
@@ -554,6 +578,7 @@ async function upsertActivation(
   }
 
   const now = nowISO();
+  const telemetryMachineHash = await telemetryMachineHashFromFingerprint(params.fingerprint);
   if (existing) {
     if (existing.status !== "active") {
       if (!bundle.plan.allowReactivation) {
@@ -570,6 +595,7 @@ async function upsertActivation(
           licenceIssuedAt: now,
           lastSeenAt: now,
           deactivatedAt: null,
+          ...(telemetryMachineHash ? { telemetryMachineHash } : {}),
         })
         .where(eq(activations.id, existing.id));
     } else {
@@ -582,6 +608,7 @@ async function upsertActivation(
           machineName: params.machineName || existing.machineName,
           licenceIssuedAt: now,
           lastSeenAt: now,
+          ...(telemetryMachineHash ? { telemetryMachineHash } : {}),
         })
         .where(eq(activations.id, existing.id));
     }
@@ -611,6 +638,7 @@ async function upsertActivation(
       status: "active",
       licenceIssuedAt: now,
       lastSeenAt: now,
+      telemetryMachineHash,
     })
     .returning({ id: activations.id });
 

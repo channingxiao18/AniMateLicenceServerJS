@@ -115,6 +115,10 @@ export const activations = sqliteTable(
     lastSeenAt: text("last_seen_at"),
     deactivatedAt: text("deactivated_at"),
     metadataJson: text("metadata_json"),
+    // sha256("animate-telemetry-v1:" + product_uuid) — the same value the
+    // client sends as telemetry machine_hash, so paid machines can be joined
+    // to their behaviour stream (telemetry-plan.md G-8).
+    telemetryMachineHash: text("telemetry_machine_hash"),
   },
   (table) => ({
     entitlementFingerprintIdx: uniqueIndex(
@@ -219,6 +223,8 @@ export const trialGrants = sqliteTable(
     appVersion: text("app_version"),
     platform: text("platform"),
     ipHash: text("ip_hash"),
+    // Same telemetry-compatible hash as activations.telemetry_machine_hash.
+    telemetryMachineHash: text("telemetry_machine_hash"),
     createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
     updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
   },

@@ -6,6 +6,7 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/index";
 import { activationLogs, plans, products, trialGrants } from "../db/schema";
+import { telemetryMachineHashFromFingerprint } from "./activation";
 import { createAuthInfo } from "../licence/auth_info";
 import { issueLicence } from "../licence/codec";
 import { ActivationError, machineIdentityFromFingerprint, nowISO } from "./activation";
@@ -385,6 +386,7 @@ export async function startTrial(
     appVersion: params.appVersion,
     platform: params.platform,
     ipHash: await ipHash(config, params.ipAddress),
+    telemetryMachineHash: await telemetryMachineHashFromFingerprint(fingerprint),
   });
 
   grant = await db.select().from(trialGrants).where(eq(trialGrants.id, trialId)).get();
