@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, like, lte, sql } from "drizzle-orm";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/index";
 import {
@@ -56,6 +56,29 @@ const EVENT_NAMES = new Set([
   "onboarding_started",
   "onboarding_step",
   "onboarding_completed",
+  // --- telemetry v2 additions (docs/product/telemetry-plan.md, AniMate repo) ---
+  "license_activated",
+  "language_picked",
+  "device_profile",
+  "guide_returned",
+  "chat_message_sent",
+  "chat_reply_received",
+  "chat_error",
+  "chat_session_ended",
+  "voice_session_started",
+  "voice_session_ended",
+  "music_sync_toggled",
+  "review_prompt_shown",
+  "review_rating_clicked",
+  "review_feedback_clicked",
+  "review_rate_completed",
+  "review_declined",
+  "onboarding_ai_first_turn",
+  "onboarding_guide_link_opened",
+  "onboarding_narration_heard",
+  "onboarding_narration_skipped",
+  "onboarding_narration_replayed",
+  "webview2_runtime_version",
 ]);
 
 const LICENSE_STATES = new Set([
@@ -128,6 +151,23 @@ const PRODUCT_EVENT_NAMES = [
   "avatar_interaction",
   "dance_started",
   "chat_opened",
+  // --- telemetry v2 additions (funnel-relevant product events) ---
+  "license_activated",
+  "language_picked",
+  "device_profile",
+  "guide_returned",
+  "chat_message_sent",
+  "chat_reply_received",
+  "chat_error",
+  "chat_session_ended",
+  "voice_session_started",
+  "voice_session_ended",
+  "music_sync_toggled",
+  "review_prompt_shown",
+  "review_rating_clicked",
+  "review_feedback_clicked",
+  "review_rate_completed",
+  "review_declined",
 ] as const;
 
 type ProductEvent = {
@@ -404,26 +444,20 @@ async function insertDailyUnique(
   uniqueValue: string,
   firstSeenAt: string
 ): Promise<boolean> {
-  const existing = await db
-    .select({ uniqueValue: telemetryDailyUniques.uniqueValue })
-    .from(telemetryDailyUniques)
-    .where(
-      and(
-        eq(telemetryDailyUniques.day, dims.day),
-        eq(telemetryDailyUniques.productId, dims.productId),
-        eq(telemetryDailyUniques.uniqueType, uniqueType),
-        eq(telemetryDailyUniques.uniqueValue, uniqueValue)
-      )
+  // Single atomic statement; RETURNING tells us whether this call actually
+  // inserted (false = the unique already existed for this day).
+  const inserted = await db.all<{ unique_value: string }>(sql`
+    INSERT INTO telemetry_daily_uniques
+      (day, product_id, unique_type, unique_value, source_id, platform, channel, app_version, license_state, first_seen_at)
+    VALUES (
+      ${dims.day}, ${dims.productId}, ${uniqueType}, ${uniqueValue},
+      ${dims.sourceId}, ${dims.platform}, ${dims.channel}, ${dims.appVersion}, ${dims.licenseState},
+      ${firstSeenAt}
     )
-    .get();
-  if (existing) return false;
-  await db.insert(telemetryDailyUniques).values({
-    ...dims,
-    uniqueType,
-    uniqueValue,
-    firstSeenAt,
-  });
-  return true;
+    ON CONFLICT (day, product_id, unique_type, unique_value) DO NOTHING
+    RETURNING unique_value
+  `);
+  return inserted.length > 0;
 }
 
 async function updateSessionState(
@@ -442,26 +476,74 @@ async function updateSessionState(
       ? "companion_visible_secs"
       : "overlay_visible_secs"
   );
-  const current = await db
-    .select()
-    .from(telemetrySessionState)
-    .where(eq(telemetrySessionState.sessionId, envelope.sessionId))
-    .get();
-  const activeSecs = current ? boundedDelta(processDuration, current.lastProcessDurationSecs) : processDuration;
-  const overlayVisibleSecs = current
-    ? boundedDelta(overlayDuration, current.lastOverlayVisibleSecs)
-    : overlayDuration;
+  const sessionId = envelope.sessionId;
+  const startedAt = numberFromPayload(envelope.payload.started_at) ?? envelope.sentAt ?? receivedAtUnix;
 
-  await upsertSessionState(
-    db,
-    envelope,
-    sourceId,
-    receivedAtUnix,
-    receivedAt,
-    processDuration,
-    overlayDuration
-  );
-  return { activeSecs, overlayVisibleSecs };
+  // Compare-and-swap on the previous duration pair. A plain read-then-write let
+  // two concurrent events for one session read the same old value and both
+  // write their own delta, silently dropping one from the daily counters
+  // (docs/d1-usage-investigation.md §4.3). The CAS keeps delta = new - old exact
+  // because the guard proves the row still held the value the delta came from.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const current = await db
+      .select({
+        process: telemetrySessionState.lastProcessDurationSecs,
+        overlay: telemetrySessionState.lastOverlayVisibleSecs,
+      })
+      .from(telemetrySessionState)
+      .where(eq(telemetrySessionState.sessionId, sessionId))
+      .get();
+
+    if (!current) {
+      const inserted = await db.run(sql`
+        INSERT INTO telemetry_session_state
+          (session_id, product_id, machine_hash, install_id, app_version, platform, channel,
+           license_state, source_id, started_at, last_event_at, last_process_duration_secs,
+           last_overlay_visible_secs, updated_at)
+        VALUES (
+          ${sessionId}, ${envelope.productId}, ${envelope.machineHash}, ${envelope.installId},
+          ${envelope.appVersion}, ${envelope.platform}, ${envelope.channel}, ${envelope.licenseState},
+          ${sourceId}, ${startedAt}, ${receivedAtUnix}, ${processDuration}, ${overlayDuration}, ${receivedAt}
+        )
+        ON CONFLICT (session_id) DO NOTHING
+      `);
+      // First observation of a session (e.g. a checkpoint without session_start
+      // after a client restart): the full duration counts as baseline, matching
+      // the pre-CAS behaviour. A concurrent insert means we lost the race; loop
+      // and let the CAS path account for the delta.
+      if (changesOf(inserted) > 0) {
+        return { activeSecs: processDuration, overlayVisibleSecs: overlayDuration };
+      }
+      continue;
+    }
+
+    const activeSecs = boundedDelta(processDuration, current.process);
+    const overlayVisibleSecs = boundedDelta(overlayDuration, current.overlay);
+    const result = await db.run(sql`
+      UPDATE telemetry_session_state SET
+        product_id = ${envelope.productId},
+        machine_hash = ${envelope.machineHash},
+        install_id = ${envelope.installId},
+        app_version = ${envelope.appVersion},
+        platform = ${envelope.platform},
+        channel = ${envelope.channel},
+        license_state = ${envelope.licenseState},
+        source_id = ${sourceId},
+        last_event_at = ${receivedAtUnix},
+        last_process_duration_secs = ${processDuration},
+        last_overlay_visible_secs = ${overlayDuration},
+        updated_at = ${receivedAt}
+      WHERE session_id = ${sessionId}
+        AND last_process_duration_secs = ${current.process}
+        AND last_overlay_visible_secs = ${current.overlay}
+    `);
+    if (changesOf(result) > 0) {
+      return { activeSecs, overlayVisibleSecs };
+    }
+  }
+  // Lost the race three times: report no delta. Durations are monotonic, so the
+  // next event of the session accounts for the gap (at most one tick wide).
+  return { activeSecs: 0, overlayVisibleSecs: 0 };
 }
 
 async function upsertSessionState(
@@ -474,34 +556,32 @@ async function upsertSessionState(
   overlayDuration: number
 ) {
   if (!envelope.sessionId) return;
-  const current = await db
-    .select()
-    .from(telemetrySessionState)
-    .where(eq(telemetrySessionState.sessionId, envelope.sessionId))
-    .get();
-  const values = {
-    productId: envelope.productId,
-    machineHash: envelope.machineHash,
-    installId: envelope.installId,
-    appVersion: envelope.appVersion,
-    platform: envelope.platform,
-    channel: envelope.channel,
-    licenseState: envelope.licenseState,
-    sourceId,
-    startedAt: numberFromPayload(envelope.payload.started_at) ?? envelope.sentAt ?? receivedAtUnix,
-    lastEventAt: receivedAtUnix,
-    lastProcessDurationSecs: processDuration,
-    lastOverlayVisibleSecs: overlayDuration,
-    updatedAt: receivedAt,
-  };
-  if (current) {
-    await db
-      .update(telemetrySessionState)
-      .set(values)
-      .where(eq(telemetrySessionState.sessionId, envelope.sessionId));
-  } else {
-    await db.insert(telemetrySessionState).values({ sessionId: envelope.sessionId, ...values });
-  }
+  const startedAt = numberFromPayload(envelope.payload.started_at) ?? envelope.sentAt ?? receivedAtUnix;
+  // Atomic upsert (no deltas involved). MAX() guards against out-of-order
+  // replays regressing the monotonic duration counters.
+  await db.run(sql`
+    INSERT INTO telemetry_session_state
+      (session_id, product_id, machine_hash, install_id, app_version, platform, channel,
+       license_state, source_id, started_at, last_event_at, last_process_duration_secs,
+       last_overlay_visible_secs, updated_at)
+    VALUES (
+      ${envelope.sessionId}, ${envelope.productId}, ${envelope.machineHash}, ${envelope.installId},
+      ${envelope.appVersion}, ${envelope.platform}, ${envelope.channel}, ${envelope.licenseState},
+      ${sourceId}, ${startedAt}, ${receivedAtUnix}, ${processDuration}, ${overlayDuration}, ${receivedAt}
+    )
+    ON CONFLICT (session_id) DO UPDATE SET
+      machine_hash = excluded.machine_hash,
+      install_id = excluded.install_id,
+      app_version = excluded.app_version,
+      platform = excluded.platform,
+      channel = excluded.channel,
+      license_state = excluded.license_state,
+      source_id = excluded.source_id,
+      last_event_at = excluded.last_event_at,
+      last_process_duration_secs = MAX(telemetry_session_state.last_process_duration_secs, excluded.last_process_duration_secs),
+      last_overlay_visible_secs = MAX(telemetry_session_state.last_overlay_visible_secs, excluded.last_overlay_visible_secs),
+      updated_at = excluded.updated_at
+  `);
 }
 
 async function incrementDailyMetrics(
@@ -516,27 +596,29 @@ async function incrementDailyMetrics(
     events: number;
   }
 ) {
-  const existing = await db
-    .select()
-    .from(telemetryDailyMetrics)
-    .where(dimsWhere(dims))
-    .get();
-  if (!existing) {
-    await db.insert(telemetryDailyMetrics).values({ ...dims, ...inc });
-    return;
-  }
-  await db
-    .update(telemetryDailyMetrics)
-    .set({
-      downloads: existing.downloads + inc.downloads,
-      installs: existing.installs + inc.installs,
-      launches: existing.launches + inc.launches,
-      activeSecs: existing.activeSecs + inc.activeSecs,
-      overlayVisibleSecs: existing.overlayVisibleSecs + inc.overlayVisibleSecs,
-      events: existing.events + inc.events,
-      updatedAt: toSqlDateTime(new Date()),
-    })
-    .where(dimsWhere(dims));
+  // Atomic additive upsert. The previous SELECT-then-UPDATE read-modify-write
+  // lost 5-9% of counts per day under concurrent isolates (see
+  // docs/d1-usage-investigation.md §4.3); a single statement cannot race.
+  await db.run(sql`
+    INSERT INTO telemetry_daily_metrics
+      (day, product_id, source_id, platform, channel, app_version, license_state,
+       downloads, installs, launches, active_secs, overlay_visible_secs, events, updated_at)
+    VALUES (
+      ${dims.day}, ${dims.productId}, ${dims.sourceId}, ${dims.platform}, ${dims.channel},
+      ${dims.appVersion}, ${dims.licenseState},
+      ${inc.downloads}, ${inc.installs}, ${inc.launches}, ${inc.activeSecs},
+      ${inc.overlayVisibleSecs}, ${inc.events}, ${toSqlDateTime(new Date())}
+    )
+    ON CONFLICT (day, product_id, source_id, platform, channel, app_version, license_state)
+    DO UPDATE SET
+      downloads = downloads + excluded.downloads,
+      installs = installs + excluded.installs,
+      launches = launches + excluded.launches,
+      active_secs = active_secs + excluded.active_secs,
+      overlay_visible_secs = overlay_visible_secs + excluded.overlay_visible_secs,
+      events = events + excluded.events,
+      updated_at = excluded.updated_at
+  `);
 }
 
 function dimsWhere(dims: MetricDimensions) {
@@ -551,6 +633,36 @@ function dimsWhere(dims: MetricDimensions) {
   );
 }
 
+export type TelemetryEventListItem = Omit<TelemetryEventRow, "rawJson">;
+
+/** Rows columns for the events table view: everything except the big raw_json blob. */
+const EVENT_LIST_COLUMNS = {
+  eventId: telemetryEvents.eventId,
+  schemaVersion: telemetryEvents.schemaVersion,
+  event: telemetryEvents.event,
+  sourceId: telemetryEvents.sourceId,
+  receivedAt: telemetryEvents.receivedAt,
+  receivedAtUnix: telemetryEvents.receivedAtUnix,
+  sentAt: telemetryEvents.sentAt,
+  productId: telemetryEvents.productId,
+  appVersion: telemetryEvents.appVersion,
+  platform: telemetryEvents.platform,
+  channel: telemetryEvents.channel,
+  machineHash: telemetryEvents.machineHash,
+  installId: telemetryEvents.installId,
+  sessionId: telemetryEvents.sessionId,
+  licenseState: telemetryEvents.licenseState,
+  activationId: telemetryEvents.activationId,
+  payloadJson: telemetryEvents.payloadJson,
+} as const;
+
+/**
+ * Raw-event browser. Every query is bounded by a mandatory time window
+ * (default 7 days, max 90) and pushed into SQL — the old implementation loaded
+ * the whole table into memory and filtered in JS, which is what burned the D1
+ * free-tier read quota on a couple of page views (see
+ * docs/d1-usage-investigation.md §3.2).
+ */
 export async function listTelemetryEvents(
   db: Database,
   params: {
@@ -559,28 +671,127 @@ export async function listTelemetryEvents(
     machineHash?: string;
     installId?: string;
     sessionId?: string;
+    /** Look-back window in days (1-90, default 7). */
+    days?: number;
     page?: number;
     pageSize?: number;
   } = {}
-): Promise<{ items: TelemetryEventRow[]; total: number }> {
+): Promise<{ items: TelemetryEventListItem[]; total: number; days: number }> {
   const page = Math.max(1, params.page || 1);
   const pageSize = Math.min(200, Math.max(1, params.pageSize || 80));
-  const all = await db.select().from(telemetryEvents).orderBy(desc(telemetryEvents.receivedAt)).all();
-  const filtered = all.filter((item) => {
-    if (params.event && item.event !== params.event) return false;
-    if (params.productId && item.productId !== params.productId) return false;
-    if (params.machineHash && !(item.machineHash || "").includes(params.machineHash)) return false;
-    if (params.installId && !(item.installId || "").includes(params.installId)) return false;
-    if (params.sessionId && !(item.sessionId || "").includes(params.sessionId)) return false;
-    return true;
-  });
-  return {
-    items: filtered.slice((page - 1) * pageSize, page * pageSize),
-    total: filtered.length,
-  };
+  const days = Math.min(90, Math.max(1, params.days || 7));
+  const since = toSqlDateTime(new Date(Date.now() - (days - 1) * 86400000));
+
+  const conditions = [gte(telemetryEvents.receivedAt, since)];
+  if (params.event) conditions.push(eq(telemetryEvents.event, params.event));
+  if (params.productId) conditions.push(eq(telemetryEvents.productId, params.productId));
+  if (params.machineHash) conditions.push(like(telemetryEvents.machineHash, `%${params.machineHash}%`));
+  if (params.installId) conditions.push(like(telemetryEvents.installId, `%${params.installId}%`));
+  if (params.sessionId) conditions.push(like(telemetryEvents.sessionId, `%${params.sessionId}%`));
+  const where = and(...conditions);
+
+  const items = await db
+    .select(EVENT_LIST_COLUMNS)
+    .from(telemetryEvents)
+    .where(where)
+    .orderBy(desc(telemetryEvents.receivedAt))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize)
+    .all();
+  const totalRow = await db
+    .select({ value: count() })
+    .from(telemetryEvents)
+    .where(where)
+    .get();
+  return { items, total: Number(totalRow?.value ?? 0), days };
+}
+
+// ---------------------------------------------------------------------------
+// Admin report cache
+// ---------------------------------------------------------------------------
+
+/**
+ * Tiny per-isolate TTL cache for the admin pages. Refreshing a report page a
+ * few times re-uses one scan instead of paying for it again; the window is
+ * short enough that the numbers feel live. Best-effort only (isolates are
+ * recycled at will) — never a correctness dependency.
+ */
+const REPORT_CACHE_TTL_MS = 5 * 60_000;
+const REPORT_CACHE = new Map<string, { at: number; value: unknown }>();
+// Vitest sets process.env.VITEST; caching there would leak results between
+// tests that reuse one in-memory database. Workers (nodejs_compat) also expose
+// process.env, where the flag is simply absent.
+const REPORT_CACHE_ENABLED = typeof process === "undefined" || !process.env?.VITEST;
+
+async function cachedReport<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  if (!REPORT_CACHE_ENABLED) return fn();
+  const now = Date.now();
+  const hit = REPORT_CACHE.get(key);
+  if (hit && now - hit.at < REPORT_CACHE_TTL_MS) return hit.value as T;
+  const value = await fn();
+  if (REPORT_CACHE.size >= 64) {
+    const oldest = REPORT_CACHE.keys().next();
+    if (!oldest.done) REPORT_CACHE.delete(oldest.value);
+  }
+  REPORT_CACHE.set(key, { at: now, value });
+  return value;
 }
 
 export async function getTelemetryReport(
+  db: Database,
+  params: { days?: number; productId?: string } = {}
+) {
+  return cachedReport(`report:${params.productId || "animate"}:${params.days || 14}`, () =>
+    getTelemetryReportUncached(db, params)
+  );
+}
+
+export async function getRetentionReport(
+  db: Database,
+  params: { days?: number; productId?: string } = {}
+) {
+  return cachedReport(`retention:${params.productId || "animate"}:${params.days || 30}`, () =>
+    getRetentionReportUncached(db, params)
+  );
+}
+
+export async function getStartupDiagnostics(
+  db: Database,
+  params: { day?: string; productId?: string } = {}
+) {
+  return cachedReport(`startup:${params.productId || "animate"}:${params.day || new Date().toISOString().slice(0, 10)}`, () =>
+    getStartupDiagnosticsUncached(db, params)
+  );
+}
+
+export async function getProductAnalyticsReport(
+  db: Database,
+  params: {
+    days?: number;
+    productId?: string;
+    appVersion?: string;
+    channel?: string;
+    licenseState?: string;
+  } = {}
+) {
+  return cachedReport(
+    `analytics:${params.productId || "animate"}:${params.days || 14}:${params.appVersion || ""}:${params.channel || ""}:${params.licenseState || ""}`,
+    () => getProductAnalyticsReportUncached(db, params)
+  );
+}
+
+export async function listTelemetryUsers(
+  db: Database,
+  params: Parameters<typeof listTelemetryUsersUncached>[1]
+) {
+  const p = params || {};
+  return cachedReport(
+    `users:${p.productId || "animate"}:${p.days || 30}:${p.q || ""}:${p.status || ""}:${p.platform || ""}:${p.sort || "last_seen"}:${p.page || 1}:${p.pageSize || 50}`,
+    () => listTelemetryUsersUncached(db, p)
+  );
+}
+
+async function getTelemetryReportUncached(
   db: Database,
   params: { days?: number; productId?: string } = {}
 ) {
@@ -872,11 +1083,11 @@ export type TelemetryInstallDetail = {
   settingsOpens: number;
   cleanExits: number;
   uncleanExits: number;
-  events: TelemetryEventRow[];
+  events: TelemetryEventListItem[];
   totalFilteredEvents: number;
 };
 
-function telemetryPayload(row: TelemetryEventRow): Record<string, unknown> {
+function telemetryPayload(row: TelemetryEventListItem): Record<string, unknown> {
   try {
     const parsed = JSON.parse(row.payloadJson);
     return isObject(parsed) ? parsed : {};
@@ -885,14 +1096,11 @@ function telemetryPayload(row: TelemetryEventRow): Record<string, unknown> {
   }
 }
 
-function telemetryOccurredAt(row: TelemetryEventRow): number {
-  try {
-    const raw = JSON.parse(row.rawJson);
-    const value = Number(raw?.occurred_at_unix_ms);
-    if (Number.isFinite(value)) return value;
-  } catch {
-    // Fall back to server receive time for v1 events.
-  }
+function telemetryOccurredAt(row: TelemetryEventListItem): number {
+  // raw_json is no longer fetched by list queries; sent_at is stamped at event
+  // build time on the client, so it is the closest cheap proxy for when the
+  // event actually happened (occurred_at_unix_ms only differed by ms).
+  if (Number.isFinite(row.sentAt) && (row.sentAt ?? 0) > 0) return (row.sentAt as number) * 1000;
   return row.receivedAtUnix * 1000;
 }
 
@@ -909,7 +1117,7 @@ export async function getTelemetryInstallDetail(
   }
 ): Promise<TelemetryInstallDetail> {
   const productId = params.productId || "animate";
-  const all = await db.select().from(telemetryEvents).where(and(
+  const all = await db.select(EVENT_LIST_COLUMNS).from(telemetryEvents).where(and(
     eq(telemetryEvents.productId, productId),
     eq(telemetryEvents.installId, params.installId),
   )).all();
@@ -994,7 +1202,7 @@ function userStatus(lastSeenAt: string): TelemetryUserSummary["status"] {
   return "likely_uninstalled";
 }
 
-export async function listTelemetryUsers(
+async function listTelemetryUsersUncached(
   db: Database,
   params: {
     productId?: string;
@@ -1002,12 +1210,22 @@ export async function listTelemetryUsers(
     status?: string;
     platform?: string;
     sort?: "last_seen" | "first_seen" | "active_secs";
+    /** Look-back window in days (1-365, default 30) — bounds the scan window. */
+    days?: number;
     page?: number;
     pageSize?: number;
   } = {},
 ): Promise<{ items: TelemetryUserSummary[]; total: number; page: number; pageSize: number }> {
   const productId = params.productId || "animate";
-  const rows = await db.select().from(telemetryEvents).where(eq(telemetryEvents.productId, productId)).all();
+  const days = Math.min(365, Math.max(1, params.days || 30));
+  const since = toSqlDateTime(new Date(Date.now() - (days - 1) * 86400000));
+  // Windowed + column-pruned: the unscoped SELECT * was the second-largest
+  // read-quota burner after the raw-events page.
+  const rows = await db
+    .select(EVENT_LIST_COLUMNS)
+    .from(telemetryEvents)
+    .where(and(eq(telemetryEvents.productId, productId), gte(telemetryEvents.receivedAt, since)))
+    .all();
   const byMachine = new Map<string, TelemetryUserSummary & { sessionMax: Map<string, { process: number; overlay: number; startedAt: string; lastAt: string }> }>();
   const sessionState = new Map<string, { machineHash: string; process: number; overlay: number; startedAt: string; lastAt: string }>();
   for (const row of rows.sort((a, b) => a.receivedAt.localeCompare(b.receivedAt))) {
@@ -1088,10 +1306,10 @@ export async function listTelemetryUsers(
 export async function getTelemetryMachineDetail(
   db: Database,
   params: { machineHash: string; productId?: string; event?: string; sessionId?: string; page?: number; pageSize?: number },
-): Promise<{ user: TelemetryUserSummary | null; events: TelemetryEventRow[]; total: number; page: number; pageSize: number }> {
+): Promise<{ user: TelemetryUserSummary | null; events: TelemetryEventListItem[]; total: number; page: number; pageSize: number }> {
   const productId = params.productId || "animate";
   const userResult = await listTelemetryUsers(db, { productId, q: params.machineHash, page: 1, pageSize: 1 });
-  const all = await db.select().from(telemetryEvents).where(and(eq(telemetryEvents.productId, productId), eq(telemetryEvents.machineHash, params.machineHash))).all();
+  const all = await db.select(EVENT_LIST_COLUMNS).from(telemetryEvents).where(and(eq(telemetryEvents.productId, productId), eq(telemetryEvents.machineHash, params.machineHash))).all();
   const filtered = all.sort((a, b) => telemetryOccurredAt(a) - telemetryOccurredAt(b) || a.receivedAt.localeCompare(b.receivedAt)).filter((row) => {
     if (params.event && row.event !== params.event) return false;
     if (params.sessionId && row.sessionId !== params.sessionId) return false;
@@ -1439,7 +1657,7 @@ async function loadDailyDeviceActivity(
   return Array.from(rows.values());
 }
 
-export async function getRetentionReport(
+async function getRetentionReportUncached(
   db: Database,
   params: { days?: number; productId?: string } = {}
 ) {
@@ -1525,7 +1743,7 @@ async function loadLifetimeUsageByInstall(
   return result;
 }
 
-export async function getStartupDiagnostics(
+async function getStartupDiagnosticsUncached(
   db: Database,
   params: { day?: string; productId?: string } = {}
 ) {
@@ -1598,12 +1816,12 @@ function percentage(numerator: number, denominator: number): number {
   return Math.round((numerator / denominator) * 1000) / 10;
 }
 
-function productIdentity(row: TelemetryEventRow): string | null {
+function productIdentity(row: TelemetryEventListItem): string | null {
   if (row.installId) return `install:${row.installId}`;
   return null;
 }
 
-function parseProductEvent(row: TelemetryEventRow): ProductEvent | null {
+function parseProductEvent(row: TelemetryEventListItem): ProductEvent | null {
   const identity = productIdentity(row);
   if (!identity) return null;
   let payload: Record<string, unknown> = {};
@@ -1677,7 +1895,7 @@ function eventSummary(events: ProductEvent[], eventName: string) {
   };
 }
 
-export async function getProductAnalyticsReport(
+async function getProductAnalyticsReportUncached(
   db: Database,
   params: {
     days?: number;
@@ -1870,6 +2088,15 @@ function boundedDelta(current: number, previous: number): number {
   if (current <= previous) return 0;
   const delta = current - previous;
   return delta > MAX_DURATION_SECS ? 0 : delta;
+}
+
+/**
+ * Rows affected by a raw `db.run(sql\`…\`)`, normalised across drivers: the D1
+ * driver reports `meta.changes`, better-sqlite3 (tests) reports `changes`.
+ */
+function changesOf(result: unknown): number {
+  const r = result as { meta?: { changes?: number }; changes?: number } | null;
+  return Number(r?.meta?.changes ?? r?.changes ?? 0);
 }
 
 function validUuidish(value: string): boolean {
