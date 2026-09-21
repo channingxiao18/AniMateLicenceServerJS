@@ -79,6 +79,15 @@ const EVENT_NAMES = new Set([
   "onboarding_narration_skipped",
   "onboarding_narration_replayed",
   "webview2_runtime_version",
+  // --- AI service config funnel (docs/plans/ai-service-setup-dialog-design.md, AniMate repo) ---
+  // Identity is capability + kind + provider_preset_id only; provider name,
+  // model, base URL and credentials are never sent by the client.
+  "chat_setup_card_shown",
+  "chat_setup_card_action",
+  "ai_provider_configured",
+  "ai_provider_validated",
+  "ai_provider_removed",
+  "ai_provider_default_changed",
 ]);
 
 const LICENSE_STATES = new Set([
@@ -168,6 +177,33 @@ const PRODUCT_EVENT_NAMES = [
   "review_feedback_clicked",
   "review_rate_completed",
   "review_declined",
+  // --- Onboarding funnel events ---
+  // Ingested (they are in EVENT_NAMES) but previously absent here. Adding them
+  // changes no current number — every one of these implies a `session_start`
+  // that day, so they cannot add a `machine_active` mark or a new
+  // (day, install) row in loadDailyDeviceActivity, and the funnel report defines
+  // no onboarding funnel. They are listed so that a future onboarding funnel
+  // added to that report does not silently report zero.
+  "onboarding_started",
+  "onboarding_step",
+  "onboarding_completed",
+  "onboarding_ai_first_turn",
+  "onboarding_narration_heard",
+  "onboarding_narration_skipped",
+  "onboarding_narration_replayed",
+  "onboarding_guide_link_opened",
+  // --- AI service config funnel (docs/plans/ai-service-setup-dialog-design.md, AniMate repo) ---
+  // Must be listed here as well as in EVENT_NAMES. This array is the candidate
+  // set for three readers: the `machine_active` daily-unique mark
+  // (updateAggregates), the per-(day, install) device view
+  // (loadDailyDeviceActivity), and the funnel report's raw event load. An event
+  // missing from it is stored but invisible to all three.
+  "chat_setup_card_shown",
+  "chat_setup_card_action",
+  "ai_provider_configured",
+  "ai_provider_validated",
+  "ai_provider_removed",
+  "ai_provider_default_changed",
 ] as const;
 
 type ProductEvent = {
