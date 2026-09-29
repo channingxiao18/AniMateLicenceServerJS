@@ -26,6 +26,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const BUCKET = "animate-model-catalog";
 const THUMB_NAMES = ["thumb.jpg", "thumb.jpeg", "thumb.png", "thumb.webp"];
@@ -47,8 +48,14 @@ function parseArgs(argv) {
 }
 
 function run(args) {
-  console.log(`+ ${args.join(" ")}`);
-  execFileSync(args[0], args.slice(1), { stdio: "inherit" });
+  // Invoke wrangler's JS entry via node directly: spawning `npx` from a child
+  // process is unreliable on Windows (npx is a .cmd shim; Node ≥20.12 rejects
+  // spawning .cmd without a shell — EINVAL).
+  const wranglerBin = fileURLToPath(
+    new URL("../node_modules/wrangler/bin/wrangler.js", import.meta.url),
+  );
+  console.log(`+ wrangler ${args.join(" ")}`);
+  execFileSync(process.execPath, [wranglerBin, ...args], { stdio: "inherit" });
 }
 
 function sqlString(value) {
@@ -87,10 +94,14 @@ async function main() {
   const manifestKey = `catalog/${modelId}/manifest.json`;
   const locales = JSON.stringify(Object.keys(manifest.name));
 
-  const remoteArgs = args.local ? ["--local"] : ["--remote"];
-  run(["npx", "wrangler", "r2", "object", "put", `${BUCKET}/${vrmKey}`, "--file", vrmPath, ...remoteArgs]);
-  run(["npx", "wrangler", "r2", "object", "put", `${BUCKET}/${thumbKey}`, "--file", thumbPath, ...remoteArgs]);
-  run(["npx", "wrangler", "r2", "object", "put", `${BUCKET}/${manifestKey}`, "--file", manifestPath, ...remoteArgs]);
+  // Flag asymmetry in wrangler 3.x: `r2 object put` targets REMOTE storage by
+  // default (only `--local` exists as a flag), while `d1 execute` defaults to
+  // LOCAL and needs an explicit `--remote`.
+  const r2Args = args.local ? ["--local"] : [];
+  const d1Args = args.local ? ["--local"] : ["--remote"];
+  run(["r2", "object", "put", `${BUCKET}/${vrmKey}`, "--file", vrmPath, ...r2Args]);
+  run(["r2", "object", "put", `${BUCKET}/${thumbKey}`, "--file", thumbPath, ...r2Args]);
+  run(["r2", "object", "put", `${BUCKET}/${manifestKey}`, "--file", manifestPath, ...r2Args]);
 
   const upsert = `
 INSERT INTO catalog_models
@@ -107,7 +118,7 @@ ON CONFLICT(id) DO UPDATE SET
   manifest_key = excluded.manifest_key,
   locales = excluded.locales,
   updated_at = datetime('now')`;
-  run(["npx", "wrangler", "d1", "execute", "animate-licence-db", "--command", upsert, ...remoteArgs]);
+  run(["d1", "execute", "animate-licence-db", "--command", upsert, ...d1Args]);
 
   console.log(`\n✅ ${modelId} 上传完成 (vrm ${(size / 1024 / 1024).toFixed(1)}MB sha256=${sha256.slice(0, 12)}… locales=${locales})`);
   console.log("   模型当前 enabled=1；如需下架: UPDATE catalog_models SET enabled=0 WHERE id=…");
