@@ -58,6 +58,8 @@ const EVENT_NAMES = new Set([
   "onboarding_completed",
   // --- telemetry v2 additions (docs/product/telemetry-plan.md, AniMate repo) ---
   "license_activated",
+  "trial_granted",
+  "trial_expired",
   "language_picked",
   "device_profile",
   "guide_returned",
@@ -162,6 +164,14 @@ const PRODUCT_EVENT_NAMES = [
   "chat_opened",
   // --- telemetry v2 additions (funnel-relevant product events) ---
   "license_activated",
+  // Trial lifecycle anchors (docs/plans/license-trial-telemetry-events-plan.md,
+  // AniMate repo): grant happens in the Rust bootstrap, expiry is the
+  // first-expiry detection per grant. Both always follow a same-day
+  // session_start, so listing them adds no machine_active marks or (day,
+  // install) rows — they are here so the trial funnel's raw event load sees
+  // them at all.
+  "trial_granted",
+  "trial_expired",
   "language_picked",
   "device_profile",
   "guide_returned",
@@ -1970,6 +1980,16 @@ async function getProductAnalyticsReportUncached(
     { key: "clicked", label: "点击购买", event: "purchase_clicked" },
     { key: "checkout", label: "打开购买页面", event: "checkout_opened" },
   ];
+  // 目标 E path from docs/product/telemetry-plan.md: grant → reminder → click →
+  // checkout → activation. Stage order is chronological, matching
+  // buildProductFunnel's per-device earliest-match walk.
+  const trialStages: FunnelStageSpec[] = [
+    { key: "granted", label: "领取试用", event: "trial_granted" },
+    { key: "reminder", label: "到期提醒曝光", event: "license_reminder_shown" },
+    { key: "clicked", label: "点击购买", event: "purchase_clicked" },
+    { key: "checkout", label: "打开购买页面", event: "checkout_opened" },
+    { key: "activated", label: "激活生效", event: "license_activated" },
+  ];
   const freeModelStages: FunnelStageSpec[] = [
     { key: "guide", label: "点击获取免费模型", event: "free_model_guide_clicked" },
     { key: "import", label: "后续点击导入", event: "model_import_clicked" },
@@ -2000,6 +2020,7 @@ async function getProductAnalyticsReportUncached(
   const importFunnel = buildProductFunnel("model_import", "模型导入", events, importStages);
   const purchaseFunnel = buildProductFunnel("purchase", "购买入口", events, purchaseStages);
   const freeModelFunnel = buildProductFunnel("free_model", "免费模型到导入", events, freeModelStages);
+  const trialFunnel = buildProductFunnel("trial", "试用到激活", events, trialStages);
   const importClicked = importFunnel.stages[0]?.devices || 0;
   const purchaseClicked = purchaseFunnel.stages[0]?.devices || 0;
   const failedImports = eventSummary(events, "model_import_failed");
@@ -2045,7 +2066,7 @@ async function getProductAnalyticsReportUncached(
       importCancelRatePct: percentage(cancelledImports.devices, importClicked),
       checkoutFailureRatePct: percentage(purchaseFailures.devices, purchaseClicked),
     },
-    funnels: { import: importFunnel, freeModel: freeModelFunnel, purchase: purchaseFunnel },
+    funnels: { import: importFunnel, freeModel: freeModelFunnel, purchase: purchaseFunnel, trial: trialFunnel },
     outcomes: { failedImports, cancelledImports, purchaseFailures },
     freeModelSurfaces: surfaceFunnels,
     dimensions: Array.from(dimensionMap.values())

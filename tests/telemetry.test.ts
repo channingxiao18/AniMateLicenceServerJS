@@ -270,6 +270,34 @@ describe("telemetry", () => {
     expect(report.funnels.import.stages[2].fromFirstPct).toBe(100);
   });
 
+  it("accepts trial lifecycle events and builds the trial-to-activation funnel", async () => {
+    const env = await createTestEnv();
+    const machine = "c".repeat(64);
+    const base = event({ machine_hash: machine, sent_at: 1781680000 });
+    const lifecycle: Array<[string, number, Record<string, unknown>]> = [
+      ["trial_granted", 1781680000, { source: "startup_bootstrap" }],
+      ["trial_expired", 1781766400, { reason: "server_time_reached", trial_started_at: 1781680000, valid_until: 1781766400, expired_at: 1781766400 }],
+      ["license_reminder_shown", 1781766500, {}],
+      ["purchase_clicked", 1781766600, { surface: "license_prompt" }],
+      ["checkout_opened", 1781766700, {}],
+      ["license_activated", 1781766900, { source: "activate_command", first_activation: true }],
+    ];
+    for (const [index, [name, sentAt, payload]] of lifecycle.entries()) {
+      await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+        ...base,
+        event_id: `e${index}000000-0000-4000-8000-00000000000${index}`,
+        sent_at: sentAt,
+        event: name,
+        license_state: name === "trial_expired" ? "expired" : "trial",
+        payload,
+      });
+    }
+
+    const report = await getProductAnalyticsReport(env.db, { days: 90, productId: "animate" });
+    expect(report.funnels.trial.stages.map((stage) => stage.devices)).toEqual([1, 1, 1, 1, 1]);
+    expect(report.funnels.trial.stages.at(-1)?.fromFirstPct).toBe(100);
+  });
+
   it("reports installation, activity detail and retention by install_id", async () => {
     const env = await createTestEnv();
     const today = new Date();

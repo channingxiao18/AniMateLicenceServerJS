@@ -423,13 +423,14 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
 
   router.get("/trials", async (c) => {
     const page = Number(c.req.query("page") || 1);
-    const result = await listTrialGrants(db, { page, pageSize: 80 });
+    const search = (c.req.query("search") || "").trim();
+    const result = await listTrialGrants(db, config, { page, pageSize: 80, search });
     const rows = result.items
       .map((t) => {
-        return `<tr><td><code>${e(t.id)}</code></td><td>${badge(t.status)}</td><td>${e(t.product?.name || "-")}</td><td>${e(t.plan?.name || "-")}</td><td><code>${e(formatPlanFeatures(t.plan?.featuresJson || "[]") || "-")}</code></td><td>${e(t.feature)}</td><td>${e(t.durationSeconds)}</td><td>${e(t.startedAt)}</td><td>${e(t.validUntil)}</td><td><code>${e(shortId(t.fingerprintHash))}</code></td><td class="actions"><form method="post" action="/admin/api/trials/${encodeURIComponent(t.id)}/delete" onsubmit="return confirm('确定删除这条试用记录？')"><button class="danger">删除</button></form></td></tr>`;
+        return `<tr><td><code>${e(t.id)}</code></td><td>${badge(t.status)}</td><td>${e(t.product?.name || "-")}</td><td>${e(t.plan?.name || "-")}</td><td><code>${e(formatPlanFeatures(t.plan?.featuresJson || "[]") || "-")}</code></td><td>${e(t.feature)}</td><td>${e(t.durationSeconds)}</td><td>${e(t.startedAt)}</td><td>${e(t.validUntil)}</td><td><code title="${e(t.fingerprintHash)}${t.telemetryMachineHash ? `&#10;机器Hash: ${e(t.telemetryMachineHash)}` : ""}">${e(shortId(t.fingerprintHash))}</code></td><td class="actions"><form method="post" action="/admin/api/trials/${encodeURIComponent(t.id)}/delete" onsubmit="return confirm('确定删除这条试用记录？')"><button class="danger">删除</button></form></td></tr>`;
       })
       .join("");
-    return c.html(shell("试用", "/admin/trials", `<div class="toolbar"><div class="muted">查看试用记录、对应产品和套餐。试用最终发放的功能列表沿用套餐正式授权的功能列表。</div></div><table><thead><tr><th>Trial ID</th><th>状态</th><th>产品</th><th>套餐</th><th>正式功能列表</th><th>试用入口</th><th>时长(秒)</th><th>开始</th><th>到期</th><th>指纹哈希</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="11" class="muted">暂无试用记录</td></tr>`}</tbody></table><div class="muted" style="margin-top:10px">共 ${result.total} 条，当前第 ${page} 页</div>`));
+    return c.html(shell("试用", "/admin/trials", `<div class="toolbar"><form method="get" class="actions"><input name="search" value="${e(search)}" placeholder="搜索指纹Hash/机器Hash/安装ID" style="width:260px"><button>搜索</button></form>${search ? `<a class="btn" href="/admin/trials">清除搜索</a>` : ""}</div><div class="toolbar"><div class="muted">查看试用记录、对应产品和套餐。试用最终发放的功能列表沿用套餐正式授权的功能列表。搜索支持 Trial ID、指纹 Hash、telemetry 机器 Hash 的完整值或前缀；也可以粘贴安装 ID（install_id），会自动反查其上报的机器后匹配试用记录。</div></div><table><thead><tr><th>Trial ID</th><th>状态</th><th>产品</th><th>套餐</th><th>正式功能列表</th><th>试用入口</th><th>时长(秒)</th><th>开始</th><th>到期</th><th title="悬停查看完整指纹 Hash 与机器 Hash">指纹哈希</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="11" class="muted">暂无试用记录</td></tr>`}</tbody></table><div class="muted" style="margin-top:10px">${search ? `搜索 “${e(search)}” 找到` : "共"} ${result.total} 条，当前第 ${page} 页</div>`));
   });
 
   router.get("/providers", async (c) => {
@@ -573,6 +574,8 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     const freeDone = report.funnels.freeModel.stages.at(-1)?.devices || 0;
     const purchaseStart = report.funnels.purchase.stages[0]?.devices || 0;
     const checkoutDone = report.funnels.purchase.stages.at(-1)?.devices || 0;
+    const trialStart = report.funnels.trial.stages[0]?.devices || 0;
+    const trialActivated = report.funnels.trial.stages.at(-1)?.devices || 0;
     const conversion = (done: number, start: number) => start > 0 ? Math.round((done / start) * 1000) / 10 : 0;
     const cards = [
       ["有产品行为的设备", report.totals.devices],
@@ -580,6 +583,7 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
       ["导入成功率", `${conversion(importDone, importStart)}%`],
       ["免费模型→导入成功", `${conversion(freeDone, freeStart)}%`],
       ["购买页打开率", `${conversion(checkoutDone, purchaseStart)}%`],
+      ["试用→激活", `${conversion(trialActivated, trialStart)}%`],
       ["导入失败设备率", `${report.totals.importFailureRatePct}%`],
     ].map(([label, value]) => `<div class="card stat"><div class="num">${e(value)}</div><div class="muted">${e(label)}</div></div>`).join("");
 
@@ -627,7 +631,7 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     </form><div class="actions"><a class="btn" href="/admin/telemetry/reports">使用报表</a><a class="btn" href="/admin/telemetry/events">原始事件</a></div></div>
     <div class="grid stats">${cards}</div>
     <h3>决策提示</h3>${decisions.join("") || `<div class="decision">当前没有触发预设风险阈值。仍需结合样本量和版本分布判断。</div>`}
-    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(420px,1fr))">${renderFunnel(report.funnels.freeModel)}${renderFunnel(report.funnels.import)}${renderFunnel(report.funnels.purchase)}</div>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(420px,1fr))">${renderFunnel(report.funnels.trial)}${renderFunnel(report.funnels.freeModel)}${renderFunnel(report.funnels.import)}${renderFunnel(report.funnels.purchase)}</div>
     <h3>免费模型三个入口</h3><table><thead><tr><th>入口</th><th>Surface</th><th>点击次数</th><th>点击设备</th><th>后续导入设备</th><th>导入成功设备</th><th>最终转化</th></tr></thead><tbody>${surfaceRows}</tbody></table>
     <h3>失败和取消</h3><table><thead><tr><th>结果</th><th>事件次数</th><th>设备数</th><th>占漏斗起点</th></tr></thead><tbody>${outcomeRows}</tbody></table>
     <h3>版本 / 渠道 / 授权状态</h3><table><thead><tr><th>版本</th><th>渠道</th><th>授权</th><th>行为设备</th><th>免费模型</th><th>点击导入</th><th>导入成功</th><th>导入转化</th><th>点击购买</th><th>购买页打开率</th></tr></thead><tbody>${dimensionRows || `<tr><td colspan="10" class="muted">暂无数据</td></tr>`}</tbody></table>
