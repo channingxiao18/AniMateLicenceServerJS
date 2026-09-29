@@ -2,10 +2,10 @@
  * One-time trial licence grants.
  */
 
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/index";
-import { activationLogs, plans, products, trialGrants } from "../db/schema";
+import { activationLogs, activations, plans, products, telemetryEvents, trialGrants } from "../db/schema";
 import { telemetryMachineHashFromFingerprint } from "./activation";
 import { createAuthInfo } from "../licence/auth_info";
 import { issueLicence } from "../licence/codec";
@@ -99,6 +99,25 @@ async function legacyFingerprintHash(
   fingerprint: string
 ): Promise<string> {
   return sha256Hex(`${config.trialFingerprintSalt}:${productId}:${feature}:${fingerprint}`);
+}
+
+/**
+ * Every fingerprint-hash formula the trial system has ever used to key grants.
+ * A machine's grant may have been written under any of them, so lookups that
+ * start from a machine identity (or a raw fingerprint) must match them all.
+ */
+async function trialFingerprintHashCandidates(
+  config: AppConfig,
+  productId: string,
+  fingerprint: string
+): Promise<string[]> {
+  const values = [
+    await fingerprintHash(config, productId, fingerprint),
+    await rawFingerprintHash(config, productId, fingerprint),
+    await legacyFingerprintHash(config, productId, DEFAULT_TRIAL_GRANT_FEATURE, fingerprint),
+    await legacyFingerprintHash(config, productId, LEGACY_TRIAL_GRANT_FEATURE, fingerprint),
+  ];
+  return Array.from(new Set(values));
 }
 
 async function ipHash(config: AppConfig, ipAddress: string): Promise<string> {
@@ -291,12 +310,8 @@ export async function startTrial(
     planDurationSeconds(trialPlan, config.trialFullFeatureDurationSeconds || 86400)
   );
   const fpHash = await fingerprintHash(config, productId, fingerprint);
-  const legacyFpHashes = new Set([
-    await rawFingerprintHash(config, productId, fingerprint),
-    await legacyFingerprintHash(config, productId, grantFeature, fingerprint),
-    await legacyFingerprintHash(config, productId, LEGACY_TRIAL_GRANT_FEATURE, fingerprint),
-  ]);
-  const candidateHashes = Array.from(new Set([fpHash, ...legacyFpHashes]));
+  const candidateHashes = await trialFingerprintHashCandidates(config, productId, fingerprint);
+  const legacyFpHashes = new Set(candidateHashes.filter((hash) => hash !== fpHash));
   const now = new Date();
 
   const grants = await db
@@ -416,30 +431,79 @@ export async function startTrial(
 
 export async function listTrialGrants(
   db: Database,
+  config: AppConfig,
   params: { page?: number; pageSize?: number; status?: string; search?: string; productId?: string }
 ): Promise<{ items: Array<TrialGrant & { product: Product | null; plan: Plan | null }>; total: number }> {
   const page = params.page || 1;
   const pageSize = params.pageSize || 20;
   const all = await db.select().from(trialGrants).orderBy(desc(trialGrants.createdAt)).all();
 
-  const enriched = [];
-  for (const grant of all) {
-    const product = await db
-      .select()
-      .from(products)
-      .where(eq(products.productId, grant.productId))
-      .get();
-    const plan = grant.planId
-      ? await db.select().from(plans).where(eq(plans.planId, grant.planId)).get()
-      : null;
-    enriched.push({ ...grant, product: product || null, plan: plan || null });
-  }
+  // Products/plans are small dimension tables. Enrich from two full-table reads
+  // instead of per-grant lookups: the N+1 pattern issues 2 D1 queries per grant,
+  // which crosses the Workers subrequest limit (~500 grants) and 500s the page.
+  const [productRows, planRows] = await Promise.all([
+    db.select().from(products).all(),
+    db.select().from(plans).all(),
+  ]);
+  const productById = new Map(productRows.map((p) => [p.productId, p]));
+  const planById = new Map(planRows.map((p) => [p.planId, p]));
+
+  const enriched = all.map((grant) => ({
+    ...grant,
+    product: productById.get(grant.productId) || null,
+    plan: grant.planId ? planById.get(grant.planId) || null : null,
+  }));
 
   let filtered = enriched;
   if (params.status) filtered = filtered.filter((x) => x.status === params.status);
   if (params.productId) filtered = filtered.filter((x) => x.productId === params.productId);
   if (params.search) {
-    const s = params.search.toUpperCase();
+    const term = params.search.trim();
+    const s = term.toUpperCase();
+
+    // Install ids only exist on telemetry rows. Resolve a pasted install id to
+    // the machine hashes reported by that install, then match grants through
+    // telemetry_machine_hash (the same value the client sends as machine_hash).
+    const installMachineHashes = new Set(
+      (
+        await db
+          .selectDistinct({ machineHash: telemetryEvents.machineHash })
+          .from(telemetryEvents)
+          .where(sql`lower(${telemetryEvents.installId}) = ${term.toLowerCase()}`)
+          .all()
+      )
+        .map((row) => row.machineHash)
+        .filter((hash): hash is string => !!hash)
+    );
+
+    // Grants created before telemetry_machine_hash existed (migration 0009)
+    // store NULL there, so a machine hash alone cannot match them. Machines
+    // that later activated a paid licence have an activations row holding the
+    // raw fingerprint blob — recompute every historical fingerprint-hash
+    // formula from it and match old grants by fingerprint_hash.
+    const machineHashes = new Set(installMachineHashes);
+    if (/^[0-9a-f]{64}$/.test(term)) machineHashes.add(term.toLowerCase());
+    const fingerprintHashCandidates = new Set<string>();
+    if (machineHashes.size > 0) {
+      const grantProductIds = Array.from(new Set(enriched.map((x) => x.productId)));
+      const activationRows = await db
+        .selectDistinct({ fingerprint: activations.fingerprint })
+        .from(activations)
+        .where(inArray(activations.telemetryMachineHash, Array.from(machineHashes)))
+        .all();
+      for (const activation of activationRows) {
+        for (const productId of grantProductIds) {
+          for (const hash of await trialFingerprintHashCandidates(
+            config,
+            productId,
+            activation.fingerprint
+          )) {
+            fingerprintHashCandidates.add(hash);
+          }
+        }
+      }
+    }
+
     filtered = filtered.filter(
       (x) =>
         x.id.toUpperCase().includes(s) ||
@@ -448,6 +512,9 @@ export async function listTrialGrants(
         (x.plan?.name || "").toUpperCase().includes(s) ||
         (x.planId || "").toUpperCase().includes(s) ||
         x.fingerprintHash.toUpperCase().includes(s) ||
+        (x.telemetryMachineHash || "").toUpperCase().includes(s) ||
+        (!!x.telemetryMachineHash && installMachineHashes.has(x.telemetryMachineHash)) ||
+        fingerprintHashCandidates.has(x.fingerprintHash) ||
         (x.appVersion || "").toUpperCase().includes(s) ||
         (x.platform || "").toUpperCase().includes(s)
     );

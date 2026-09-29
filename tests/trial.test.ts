@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { createTestEnv, seedPlan, seedProduct } from "./helpers/setup";
 import { decryptLicencePayload } from "../src/licence/codec";
-import { plans, trialGrants } from "../src/db/schema";
+import { activations, entitlements, plans, telemetryEvents, trialGrants } from "../src/db/schema";
 import { createAdminApiRouter } from "../src/routes/admin_api";
 import { ActivationError } from "../src/services/activation";
 import { listTrialGrants, startTrial } from "../src/services/trial";
@@ -29,6 +29,14 @@ async function fingerprintBlobForMachine(machineId: string, iv: string): Promise
   };
   const ciphertextHex = await aesEncrypt(getAesKey(), iv, JSON.stringify(deviceInfo));
   return packAesBlob(iv, ciphertextHex);
+}
+
+async function machineHashForMachineId(machineId: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`animate-telemetry-v1:${machineId}`)
+  );
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 describe("trial licence grants", () => {
@@ -315,7 +323,7 @@ describe("trial licence grants", () => {
       ipAddress: "127.0.0.1",
     });
 
-    const grants = await listTrialGrants(env.db, { page: 1, pageSize: 20 });
+    const grants = await listTrialGrants(env.db, env.config, { page: 1, pageSize: 20 });
 
     expect(grants.total).toBe(1);
     expect(grants.items[0].id).toBe(result.trial.trial_id);
@@ -326,6 +334,138 @@ describe("trial licence grants", () => {
       "import_dance",
       "import_stage",
     ]);
+  });
+
+  it("searches trial grants by fingerprint hash, machine hash and install id", async () => {
+    const env = await createTestEnv();
+    const machineId = "search-machine-uuid-0001";
+    const fingerprint = await fingerprintBlobForMachine(
+      machineId,
+      "abcdef0123456789abcdef0123456789"
+    );
+
+    const result = await startTrial(env.db, env.config, {
+      productId: "animate",
+      fingerprint,
+      appVersion: "1.2.0",
+      platform: "windows",
+      ipAddress: "127.0.0.1",
+    });
+    await startTrial(env.db, env.config, {
+      productId: "animate",
+      fingerprint: "unrelated-opaque-fingerprint",
+      appVersion: "1.2.0",
+      platform: "windows",
+      ipAddress: "127.0.0.1",
+    });
+
+    const grant = await env.db
+      .select()
+      .from(trialGrants)
+      .where(eq(trialGrants.id, result.trial.trial_id))
+      .get();
+    expect(grant).toBeTruthy();
+    expect(grant!.telemetryMachineHash).toBeTruthy();
+
+    // Full and prefix fingerprint hash both narrow down to the single grant.
+    for (const term of [grant!.fingerprintHash, grant!.fingerprintHash.slice(0, 16)]) {
+      const found = await listTrialGrants(env.db, env.config, { page: 1, pageSize: 20, search: term });
+      expect(found.total).toBe(1);
+      expect(found.items[0].id).toBe(grant!.id);
+    }
+
+    // Telemetry machine hash (what the admin sees on telemetry pages).
+    const byMachineHash = await listTrialGrants(env.db, env.config, {
+      page: 1,
+      pageSize: 20,
+      search: grant!.telemetryMachineHash!,
+    });
+    expect(byMachineHash.total).toBe(1);
+    expect(byMachineHash.items[0].id).toBe(grant!.id);
+
+    // Install id is resolved through telemetry_events to its machine hash.
+    const installId = "install-id-for-search-machine";
+    await env.db.insert(telemetryEvents).values({
+      eventId: "evt-search-test-1",
+      schemaVersion: 1,
+      event: "app_launch",
+      sourceId: "desktop_prod",
+      receivedAtUnix: Math.floor(Date.now() / 1000),
+      productId: "animate",
+      machineHash: grant!.telemetryMachineHash!,
+      installId,
+      payloadJson: "{}",
+      rawJson: "{}",
+    });
+    const byInstallId = await listTrialGrants(env.db, env.config, {
+      page: 1,
+      pageSize: 20,
+      search: installId.toUpperCase(),
+    });
+    expect(byInstallId.total).toBe(1);
+    expect(byInstallId.items[0].id).toBe(grant!.id);
+
+    // An install id with no telemetry rows matches nothing.
+    const unknownInstall = await listTrialGrants(env.db, env.config, {
+      page: 1,
+      pageSize: 20,
+      search: "install-id-never-seen",
+    });
+    expect(unknownInstall.total).toBe(0);
+  });
+
+  it("finds legacy grants without telemetry_machine_hash via paid activation fingerprints", async () => {
+    const env = await createTestEnv();
+    const machineId = "legacy-bridge-machine-0001";
+    const trialFingerprint = await fingerprintBlobForMachine(
+      machineId,
+      "101112131415161718191a1b1c1d1e1f"
+    );
+
+    const result = await startTrial(env.db, env.config, {
+      productId: "animate",
+      fingerprint: trialFingerprint,
+      appVersion: "1.2.0",
+      platform: "windows",
+      ipAddress: "127.0.0.1",
+    });
+
+    // Simulate a pre-0009 grant: telemetry_machine_hash used to be NULL.
+    await env.db
+      .update(trialGrants)
+      .set({ telemetryMachineHash: null })
+      .where(eq(trialGrants.id, result.trial.trial_id))
+      .run();
+
+    // The same machine later activates a paid licence from a fresh blob
+    // (different iv/timestamp), storing its raw fingerprint and machine hash.
+    const activationFingerprint = await fingerprintBlobForMachine(
+      machineId,
+      "2122232425262728292a2b2c2d2e2f30"
+    );
+    const machineHash = await machineHashForMachineId(machineId);
+    await env.db
+      .insert(entitlements)
+      .values({ productId: "animate", planId: "animate-companion-lifetime-basic-v1", status: "active" })
+      .run();
+    const entitlement = await env.db.select().from(entitlements).all();
+    await env.db
+      .insert(activations)
+      .values({
+        entitlementId: entitlement[entitlement.length - 1].id,
+        fingerprint: activationFingerprint,
+        telemetryMachineHash: machineHash,
+      })
+      .run();
+
+    const found = await listTrialGrants(env.db, env.config, {
+      page: 1,
+      pageSize: 20,
+      search: machineHash,
+    });
+    expect(found.total).toBe(1);
+    expect(found.items[0].id).toBe(result.trial.trial_id);
+    expect(found.items[0].telemetryMachineHash).toBeNull();
   });
 
   it("deletes trial grants through the admin API for testing", async () => {
@@ -347,7 +487,7 @@ describe("trial licence grants", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: "ok" });
-    const grants = await listTrialGrants(env.db, { page: 1, pageSize: 20 });
+    const grants = await listTrialGrants(env.db, env.config, { page: 1, pageSize: 20 });
     expect(grants.total).toBe(0);
   });
 
