@@ -19,6 +19,12 @@ import { getAesKey, aesDecrypt } from "../crypto/aes";
 import { parseLicenceOuter, parseLicenceInner } from "../licence/codec";
 import { recordTelemetryEvent, TelemetryError } from "../services/telemetry";
 import { startTrial } from "../services/trial";
+import {
+  catalogStatusFor,
+  claimCatalogModel,
+  reportCatalogResult,
+  type CatalogObjectStore,
+} from "../services/catalog";
 import { products } from "../db/schema";
 import { eq } from "drizzle-orm";
 import { FeedbackError, feedbackCountForMachine, recordFeedback, validateFeedbackBody } from "../services/feedback";
@@ -35,6 +41,10 @@ type ClientBody = {
   feature?: string;
   /** Signed licence token — required for deactivate to prove device ownership. */
   licence_token?: string;
+  /** Model-catalog claim/report extras (Lever 1). */
+  locale?: string;
+  grant_id?: string;
+  result?: string;
 };
 
 function readClientBody(body: ClientBody) {
@@ -51,6 +61,16 @@ function readClientBody(body: ClientBody) {
 
 function statusFor(err: ActivationError): 200 | 400 | 403 | 404 | 409 | 429 | 500 | 502 {
   return err.statusCode as 200 | 400 | 403 | 404 | 409 | 429 | 500 | 502;
+}
+
+/**
+ * Cloudflare edge geolocation for the model-catalog region gate. Returns null
+ * when the field is absent (tests, local dev) — the gate then allows through
+ * and the claim stays trial-gated.
+ */
+function cfCountry(c: { req: { raw: Request } }): string | null {
+  const cf = (c.req.raw as Request & { cf?: { country?: unknown } }).cf;
+  return typeof cf?.country === "string" ? cf.country : null;
 }
 
 function activationErrorBody(err: ActivationError): Record<string, unknown> {
@@ -152,7 +172,12 @@ async function verifyLicenceTokenFingerprint(
   return fingerprint;
 }
 
-export function createV1Router(db: Database, config: AppConfig, registry: ProviderRegistry): Hono {
+export function createV1Router(
+  db: Database,
+  config: AppConfig,
+  registry: ProviderRegistry,
+  catalogBucket?: CatalogObjectStore | null
+): Hono {
   const router = new Hono();
   const rateLimiter = createRateLimiter({
     ipMax: config.activateRateLimitIpMax,
@@ -176,6 +201,20 @@ export function createV1Router(db: Database, config: AppConfig, registry: Provid
       message: "请求过于频繁，请稍后再试",
     }
   );
+  const catalogRateLimiter = createRateLimiter(
+    {
+      ipMax: config.activateRateLimitIpMax,
+      ipWindowSeconds: config.activateRateLimitIpWindowSeconds,
+      ipFailMax: config.activateRateLimitIpFailMax,
+      ipFailWindowSeconds: config.activateRateLimitIpFailWindowSeconds,
+      orderFailMax: config.activateRateLimitOrderFailMax,
+      orderFailWindowSeconds: config.activateRateLimitOrderFailWindowSeconds,
+    },
+    {
+      errorCode: "CATALOG_RATE_LIMITED",
+      message: "请求过于频繁，请稍后再试",
+    }
+  );
 
   router.use("/activate", rateLimiter);
   router.use("/refresh", rateLimiter);
@@ -183,6 +222,8 @@ export function createV1Router(db: Database, config: AppConfig, registry: Provid
   router.use("/license/status", rateLimiter);
   router.use("/trials/start", trialRateLimiter);
   router.use("/trials/time-check", trialRateLimiter);
+  router.use("/models/catalog/claim", catalogRateLimiter);
+  router.use("/models/catalog/report", catalogRateLimiter);
 
   router.post("/telemetry", async (c) => {
     try {
@@ -304,15 +345,21 @@ export function createV1Router(db: Database, config: AppConfig, registry: Provid
     }
 
     try {
-      return c.json(
-        await startTrial(db, config, {
-          productId: request.productId,
-          fingerprint: request.fingerprint,
-          appVersion: request.appVersion,
-          platform: request.platform,
-          ipAddress: ip,
-        })
-      );
+      const trialResponse = await startTrial(db, config, {
+        productId: request.productId,
+        fingerprint: request.fingerprint,
+        appVersion: request.appVersion,
+        platform: request.platform,
+        ipAddress: ip,
+      });
+      // Lever 1: ride the catalog eligibility flag on the trial response so the
+      // workshop card can decide visibility without a second round-trip.
+      const modelCatalog = await catalogStatusFor(db, config, {
+        productId: request.productId || config.defaultProductId,
+        fingerprint: request.fingerprint,
+        country: cfCountry(c),
+      });
+      return c.json({ ...trialResponse, model_catalog: modelCatalog });
     } catch (err) {
       if (err instanceof ActivationError) {
         if (err.statusCode !== 200) {
@@ -349,6 +396,81 @@ export function createV1Router(db: Database, config: AppConfig, registry: Provid
       return c.json({ server_time: Math.floor(Date.now() / 1000) });
     } catch (err) {
       console.error("Trial time-check error:", err);
+      return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
+    }
+  });
+
+  router.post("/models/catalog/claim", async (c) => {
+    const limiter = c.get("rateLimiter") as ActivateRateLimiter;
+    const ip = c.get("clientIp") as string;
+
+    let body: ClientBody;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "INVALID_REQUEST", message: "请求体格式无效" }, 400);
+    }
+
+    const request = readClientBody(body);
+    if (!limiter.failuresAllowed(ip, request.fingerprint || null)) {
+      return c.json({ error: "CATALOG_RATE_LIMITED", message: "失败次数过多，请稍后再试" }, 429);
+    }
+
+    try {
+      return c.json(
+        await claimCatalogModel(db, config, catalogBucket ?? null, {
+          productId: request.productId || config.defaultProductId,
+          fingerprint: request.fingerprint,
+          locale: typeof body.locale === "string" ? body.locale : "en",
+          appVersion: request.appVersion,
+          platform: request.platform,
+          country: cfCountry(c),
+          grantId: typeof body.grant_id === "string" && body.grant_id ? body.grant_id : null,
+        })
+      );
+    } catch (err) {
+      if (err instanceof ActivationError) {
+        if (err.statusCode !== 200) {
+          limiter.recordFailure(ip, request.fingerprint || null);
+        }
+        return c.json(activationErrorBody(err), statusFor(err));
+      }
+      limiter.recordFailure(ip, request.fingerprint || null);
+      console.error("Catalog claim error:", err);
+      return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
+    }
+  });
+
+  router.post("/models/catalog/report", async (c) => {
+    const ip = c.get("clientIp") as string;
+
+    let body: ClientBody;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "INVALID_REQUEST", message: "请求体格式无效" }, 400);
+    }
+
+    const request = readClientBody(body);
+    const grantId = typeof body.grant_id === "string" ? body.grant_id : "";
+    if (!grantId) {
+      return c.json({ error: "INVALID_REQUEST", message: "grant_id 不能为空" }, 400);
+    }
+
+    try {
+      await reportCatalogResult(db, config, {
+        productId: request.productId || config.defaultProductId,
+        fingerprint: request.fingerprint,
+        grantId,
+        result: typeof body.result === "string" ? body.result : "",
+        appVersion: request.appVersion,
+      });
+      return c.json({ status: "ok" });
+    } catch (err) {
+      if (err instanceof ActivationError) {
+        return c.json(activationErrorBody(err), statusFor(err));
+      }
+      console.error("Catalog report error:", err);
       return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
     }
   });

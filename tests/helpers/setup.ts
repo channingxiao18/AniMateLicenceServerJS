@@ -288,6 +288,36 @@ CREATE INDEX IF NOT EXISTS feedback_submissions_created_idx ON feedback_submissi
 CREATE INDEX IF NOT EXISTS feedback_submissions_source_idx ON feedback_submissions (source, created_at);
 CREATE INDEX IF NOT EXISTS feedback_submissions_machine_idx ON feedback_submissions (machine_hash, created_at);
 CREATE INDEX IF NOT EXISTS feedback_submissions_ip_idx ON feedback_submissions (ip_address, created_at);
+
+CREATE TABLE IF NOT EXISTS catalog_models (
+  id text PRIMARY KEY NOT NULL,
+  enabled integer DEFAULT 1 NOT NULL,
+  weight integer DEFAULT 1 NOT NULL,
+  sha256 text NOT NULL,
+  size_bytes integer NOT NULL,
+  r2_key_vrm text NOT NULL,
+  r2_key_thumb text NOT NULL,
+  manifest_key text NOT NULL,
+  locales text,
+  created_at text DEFAULT (datetime('now')) NOT NULL,
+  updated_at text DEFAULT (datetime('now')) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS catalog_models_enabled_idx ON catalog_models (enabled);
+
+CREATE TABLE IF NOT EXISTS catalog_grants (
+  grant_id text PRIMARY KEY NOT NULL,
+  fingerprint_hash text NOT NULL,
+  model_id text NOT NULL,
+  locale text NOT NULL,
+  country text,
+  status text DEFAULT 'claimed' NOT NULL,
+  app_version text,
+  platform text,
+  created_at text DEFAULT (datetime('now')) NOT NULL,
+  imported_at text
+);
+CREATE INDEX IF NOT EXISTS catalog_grants_fingerprint_idx ON catalog_grants (fingerprint_hash);
+CREATE INDEX IF NOT EXISTS catalog_grants_model_idx ON catalog_grants (model_id);
 `;
 
 export function createTestDb(): { sqlite: Database.Database; db: AppDb } {
@@ -347,6 +377,13 @@ export function createTestConfig(rsaPrivateKeyPkcs8Hex: string): AppConfig {
     trialFullFeatureDurationSeconds: 86400,
     trialTimeCheckToken: "animate-trial-time-check-v1",
     trialFingerprintSalt: "test_trial_salt",
+    catalogEnabled: false,
+    catalogExcludedCountries: ["CN"],
+    catalogMaxGrantsPerMachine: 3,
+    catalogDownloadUrlTtlSeconds: 900,
+    catalogR2Endpoint: "",
+    r2AccessKeyId: "",
+    r2SecretAccessKey: "",
   };
 }
 

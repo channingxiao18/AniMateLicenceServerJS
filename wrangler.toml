@@ -29,6 +29,18 @@ TELEMETRY_TOKENS = "animate-desktop-prod-v1-0991ed7c066d949eb026d8c5e40f3230:des
 TRIAL_ENABLED = "true"
 TRIAL_FULL_FEATURE_DURATION_SECONDS = "86400"
 TRIAL_TIME_CHECK_TOKEN = "animate-trial-time-check-v1"
+# ─── Model catalog (Lever 1, 2026-09-29) ─────────────────────────────────
+# Random sample models for trial machines. Objects live in R2; the client
+# downloads via presigned URLs. Keep CATALOG_ENABLED=false until models are
+# uploaded and verified (scripts/catalog_upload.mjs).
+# Region gate decision: mainland China not open yet — country gate only;
+# app locale is NOT an exclusion criterion, it only picks content language.
+CATALOG_ENABLED = "false"
+CATALOG_EXCLUDED_COUNTRIES = "CN"
+CATALOG_MAX_GRANTS_PER_MACHINE = "3"
+CATALOG_DOWNLOAD_URL_TTL_SECONDS = "900"
+# https://{account_id}.r2.cloudflarestorage.com/animate-model-catalog
+CATALOG_R2_ENDPOINT = ""
 
 # Secrets (already set, set via: wrangler secret put <NAME>)
 #   ADMIN_PASSWORD
@@ -36,3 +48,10 @@ TRIAL_TIME_CHECK_TOKEN = "animate-trial-time-check-v1"
 #   RSA_PRIVATE_KEY_PKCS8_HEX
 #   CREEM_API_KEY
 #   TRIAL_FINGERPRINT_SALT
+#   R2_ACCESS_KEY_ID      # read-only R2 API token (Object Read, scoped to animate-model-catalog)
+#   R2_SECRET_ACCESS_KEY
+
+# ─── Model catalog storage ────────────────────────────────────────────────
+[[r2_buckets]]
+binding = "CATALOG"
+bucket_name = "animate-model-catalog"

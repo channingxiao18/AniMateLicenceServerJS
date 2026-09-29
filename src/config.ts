@@ -29,6 +29,15 @@ export interface AppConfig {
   trialFullFeatureDurationSeconds: number;
   trialTimeCheckToken: string;
   trialFingerprintSalt: string;
+  // Random sample-model catalog (Lever 1). Disabled by default — flip
+  // CATALOG_ENABLED only after models are uploaded and verified.
+  catalogEnabled: boolean;
+  catalogExcludedCountries: string[];
+  catalogMaxGrantsPerMachine: number;
+  catalogDownloadUrlTtlSeconds: number;
+  catalogR2Endpoint: string;
+  r2AccessKeyId: string;
+  r2SecretAccessKey: string;
 }
 
 export function loadConfig(env: Record<string, string | undefined>): AppConfig {
@@ -95,5 +104,21 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
       env.TRIAL_FINGERPRINT_SALT ||
       env.SESSION_SECRET ||
       "change_me_trial_fingerprint_salt",
+    catalogEnabled: (env.CATALOG_ENABLED || "false").toLowerCase() === "true",
+    catalogExcludedCountries: (env.CATALOG_EXCLUDED_COUNTRIES || "CN")
+      .split(",")
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean),
+    catalogMaxGrantsPerMachine: parseInt(
+      env.CATALOG_MAX_GRANTS_PER_MACHINE || "3",
+      10
+    ),
+    catalogDownloadUrlTtlSeconds: parseInt(
+      env.CATALOG_DOWNLOAD_URL_TTL_SECONDS || "900",
+      10
+    ),
+    catalogR2Endpoint: env.CATALOG_R2_ENDPOINT || "",
+    r2AccessKeyId: env.R2_ACCESS_KEY_ID || "",
+    r2SecretAccessKey: env.R2_SECRET_ACCESS_KEY || "",
   };
 }

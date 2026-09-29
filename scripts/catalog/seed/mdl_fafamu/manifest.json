@@ -1,0 +1,12 @@
+{
+  "id": "mdl_fafamu",
+  "name": {
+    "en": "Fafamu",
+    "ja": "ふぁふぁむ"
+  },
+  "tags": {
+    "en": ["cute", "white hair", "companion"],
+    "ja": ["かわいい", "白髪", "コンパニオン"]
+  },
+  "license_note": "Bundled with the AniMate installer (companion-v1, author: Nara); owned by the AniMate project. Test seed for the model-catalog pipeline (Lever 1)."
+}

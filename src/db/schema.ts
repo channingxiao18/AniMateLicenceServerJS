@@ -388,3 +388,52 @@ export const feedbackSubmissions = sqliteTable(
     ipIdx: index("feedback_submissions_ip_idx").on(table.ipAddress, table.createdAt),
   })
 );
+
+// Random sample-model catalog for trial machines (Lever 1, 2026-09-29 plan).
+// `catalog_models` holds runtime selection fields only — the copy payload
+// (name/tags i18n, license note) lives in each model's manifest.json object in
+// R2 and is read once per claim. See the plan doc §2.3 for the field split.
+export const catalogModels = sqliteTable(
+  "catalog_models",
+  {
+    id: text("id").primaryKey(),
+    enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+    weight: integer("weight").notNull().default(1),
+    sha256: text("sha256").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    r2KeyVrm: text("r2_key_vrm").notNull(),
+    r2KeyThumb: text("r2_key_thumb").notNull(),
+    manifestKey: text("manifest_key").notNull(),
+    // JSON array of locales the manifest provides, e.g. '["en","ja"]'.
+    // Selection filters on it; "en" doubles as the fallback locale.
+    locales: text("locales"),
+    createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+    updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => ({
+    enabledIdx: index("catalog_models_enabled_idx").on(table.enabled),
+  })
+);
+
+// One row per claim — the quota record ("N per machine") and the analysis
+// ledger. Rows count against quota unless status = 'refunded'; retries of the
+// same grant reuse its row, so a download retry never burns extra quota.
+export const catalogGrants = sqliteTable(
+  "catalog_grants",
+  {
+    grantId: text("grant_id").primaryKey(),
+    fingerprintHash: text("fingerprint_hash").notNull(),
+    modelId: text("model_id").notNull(),
+    locale: text("locale").notNull(),
+    country: text("country"),
+    status: text("status").notNull().default("claimed"),
+    appVersion: text("app_version"),
+    platform: text("platform"),
+    createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+    importedAt: text("imported_at"),
+  },
+  (table) => ({
+    fingerprintIdx: index("catalog_grants_fingerprint_idx").on(table.fingerprintHash),
+    modelIdx: index("catalog_grants_model_idx").on(table.modelId),
+  })
+);

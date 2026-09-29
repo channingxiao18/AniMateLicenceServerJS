@@ -41,6 +41,15 @@ export interface Env {
   CREEM_TEST_MODE?: string;
   CREEM_DEFAULT_PRODUCT_ID?: string;
   CREEM_DEFAULT_PLAN_ID?: string;
+  // Model catalog (Lever 1)
+  CATALOG?: R2Bucket;
+  CATALOG_ENABLED?: string;
+  CATALOG_EXCLUDED_COUNTRIES?: string;
+  CATALOG_MAX_GRANTS_PER_MACHINE?: string;
+  CATALOG_DOWNLOAD_URL_TTL_SECONDS?: string;
+  CATALOG_R2_ENDPOINT?: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
 }
 
 async function initApp(env: Env): Promise<Hono> {
@@ -84,7 +93,7 @@ async function initApp(env: Env): Promise<Hono> {
 
   app.get("/health", (c) => c.json({ status: "ok", service: "animate-licence-server" }));
   app.get("/", (c) => c.redirect("/admin/"));
-  app.route("/v1", createV1Router(db, config, registry));
+  app.route("/v1", createV1Router(db, config, registry, env.CATALOG ?? null));
   app.route("/webhooks", createWebhookRouter(db, config, registry));
 
   app.get("/admin", (c) => c.redirect("/admin/"));
