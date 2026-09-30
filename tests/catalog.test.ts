@@ -11,8 +11,10 @@ import {
   parseLocales,
   pickRandomModel,
   presignedGetUrl,
+  readCatalogCardEnabled,
   reportCatalogResult,
   resolveManifestContent,
+  writeCatalogCardEnabled,
   type CatalogObjectStore,
 } from "../src/services/catalog";
 import { ActivationError } from "../src/services/activation";
@@ -134,6 +136,7 @@ describe("catalog claim flow", () => {
     const env = await createTestEnv();
     enableCatalog(env);
     await seedModel(env);
+    await writeCatalogCardEnabled(env.db, true);
     const err = await catchActivationError(() =>
       claimCatalogModel(env.db, env.config, fakeBucket(TEST_MANIFEST), {
         productId: "animate",
@@ -169,6 +172,7 @@ describe("catalog claim flow", () => {
     expect(disabled.error).toBe("CATALOG_DISABLED");
 
     env.config.catalogEnabled = true;
+    await writeCatalogCardEnabled(env.db, true);
     const excluded = await catchActivationError(() =>
       claimCatalogModel(env.db, env.config, fakeBucket(TEST_MANIFEST), {
         productId: "animate",
@@ -188,6 +192,7 @@ describe("catalog claim flow", () => {
     enableCatalog(env);
     await seedModel(env);
     await startTrialFor(env, "trial-machine-100");
+    await writeCatalogCardEnabled(env.db, true);
 
     const claim = await claimCatalogModel(env.db, env.config, fakeBucket(TEST_MANIFEST), {
       productId: "animate",
@@ -263,6 +268,7 @@ describe("catalog claim flow", () => {
     enableCatalog(env);
     await seedModel(env);
     await startTrialFor(env, "report-machine");
+    await writeCatalogCardEnabled(env.db, true);
 
     const claim = await claimCatalogModel(env.db, env.config, fakeBucket(TEST_MANIFEST), {
       productId: "animate",
@@ -330,6 +336,7 @@ describe("catalog status flag (trial bootstrap)", () => {
     ).toEqual({ enabled: false, remaining: 0, max: 3 });
 
     env.config.catalogEnabled = true;
+    await writeCatalogCardEnabled(env.db, true);
     expect(
       await catalogStatusFor(env.db, env.config, {
         productId: "animate",
@@ -371,6 +378,7 @@ describe("catalog status with an empty catalog", () => {
     enableCatalog(env);
     const params = { productId: "animate", fingerprint: "empty-catalog-machine", country: "US" as string | null };
     await startTrialFor(env, params.fingerprint);
+    await writeCatalogCardEnabled(env.db, true);
 
     expect(await catalogStatusFor(env.db, env.config, params)).toEqual({
       enabled: false,
@@ -386,6 +394,57 @@ describe("catalog status with an empty catalog", () => {
     });
 
     await env.db.update(catalogModels).set({ enabled: false }).where(eq(catalogModels.id, "mdl_test"));
+    expect(await catalogStatusFor(env.db, env.config, params)).toEqual({
+      enabled: false,
+      remaining: 0,
+      max: 3,
+    });
+  });
+});
+
+describe("catalog card master flag (dashboard toggle)", () => {
+  it("defaults to hidden and gates both bootstrap flag and claim", async () => {
+    const env = await createTestEnv();
+    enableCatalog(env);
+    await seedModel(env);
+    await startTrialFor(env, "flag-machine");
+    const params = {
+      productId: "animate",
+      fingerprint: "flag-machine",
+      country: "US" as string | null,
+    };
+
+    // Default OFF: model uploaded, trial active — card still hidden.
+    expect(await readCatalogCardEnabled(env.db)).toBe(false);
+    expect(await catalogStatusFor(env.db, env.config, params)).toEqual({
+      enabled: false,
+      remaining: 0,
+      max: 3,
+    });
+    const claimErr = await catchActivationError(() =>
+      claimCatalogModel(env.db, env.config, fakeBucket(TEST_MANIFEST), {
+        productId: "animate",
+        fingerprint: "flag-machine",
+        locale: "en",
+        appVersion: null,
+        platform: null,
+        country: "US",
+        grantId: null,
+      })
+    );
+    expect(claimErr.error).toBe("CATALOG_CARD_DISABLED");
+
+    // Admin enables → card shows for eligible machines.
+    await writeCatalogCardEnabled(env.db, true);
+    expect(await readCatalogCardEnabled(env.db)).toBe(true);
+    expect(await catalogStatusFor(env.db, env.config, params)).toEqual({
+      enabled: true,
+      remaining: 3,
+      max: 3,
+    });
+
+    // The deploy-level env master still wins (AND semantics).
+    env.config.catalogEnabled = false;
     expect(await catalogStatusFor(env.db, env.config, params)).toEqual({
       enabled: false,
       remaining: 0,

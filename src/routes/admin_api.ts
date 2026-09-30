@@ -28,6 +28,7 @@ import {
   updateProduct,
 } from "../services/activation";
 import { parsePlanFeatures } from "../services/plan_features";
+import { readCatalogCardEnabled, writeCatalogCardEnabled } from "../services/catalog";
 import { deleteTrialGrant } from "../services/trial";
 
 import type { ProviderRegistry } from "../services/provider";
@@ -394,6 +395,26 @@ export function createAdminApiRouter(db: Database, _config: AppConfig, registry:
     try {
       await deleteTrialGrant(db, c.req.param("id"));
       return okOrRedirect(c, { status: "ok" });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  // Model catalog card master flag (Lever 1): dashboard one-click show/hide.
+  router.get("/catalog/card-flag", async (c) => {
+    return c.json({ enabled: await readCatalogCardEnabled(db) });
+  });
+
+  router.post("/catalog/card-flag", async (c) => {
+    try {
+      const body = await readBody(c);
+      const raw = body.enabled;
+      if (raw !== true && raw !== "true" && raw !== "1" && raw !== false && raw !== "false" && raw !== "0") {
+        return c.json({ error: "INVALID_REQUEST", message: "enabled 取值无效" }, 400);
+      }
+      const enabled = raw === true || raw === "true" || raw === "1";
+      await writeCatalogCardEnabled(db, enabled);
+      return okOrRedirect(c, { status: "ok", enabled });
     } catch (err) {
       return errorResponse(c, err);
     }

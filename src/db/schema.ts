@@ -389,6 +389,15 @@ export const feedbackSubmissions = sqliteTable(
   })
 );
 
+
+// Key-value switches for the model catalog (Lever 1). Absent key = default
+// (card_enabled absent means the workshop card stays hidden).
+export const catalogSettings = sqliteTable("catalog_settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
+});
+
 // Random sample-model catalog for trial machines (Lever 1, 2026-09-29 plan).
 // `catalog_models` holds runtime selection fields only — the copy payload
 // (name/tags i18n, license note) lives in each model's manifest.json object in

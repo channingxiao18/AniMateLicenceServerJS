@@ -20,6 +20,7 @@ import {
   listWebhookEvents,
 } from "../services/activation";
 import { formatPlanFeatures } from "../services/plan_features";
+import { readCatalogCardEnabled } from "../services/catalog";
 import { listTrialGrants } from "../services/trial";
 import { listFeedback } from "../services/feedback";
 import {
@@ -296,6 +297,7 @@ function renderFunnel(funnel: ProductFunnel): string {
 export async function renderAdminDashboard(db: Database, successMessage = ""): Promise<string> {
   const stats = await getDashboardStats(db);
   const reports = await getProductReports(db);
+  const catalogCardEnabled = await readCatalogCardEnabled(db);
   const cards = [
     ["产品", stats.products],
     ["套餐", stats.plans],
@@ -312,7 +314,7 @@ export async function renderAdminDashboard(db: Database, successMessage = ""): P
   return shell(
     "仪表板",
     "/admin/",
-    `${successMessage ? `<div class="flash">${e(successMessage)}</div>` : ""}<div class="grid stats">${cards}</div><div class="toolbar"><h2>产品报表</h2></div><table><thead><tr><th>产品 ID</th><th>产品</th><th>状态</th><th>套餐数</th><th>兑换码</th><th>活跃权益</th><th>激活设备</th><th>作废</th></tr></thead><tbody>${rows || `<tr><td colspan="8" class="muted">暂无数据</td></tr>`}</tbody></table>`
+    `${successMessage ? `<div class="flash">${e(successMessage)}</div>` : ""}<div class="grid stats">${cards}</div><div class="card"><h3>模型目录卡片</h3><div class="actions" style="align-items:center"><span>当前状态：${badge(catalogCardEnabled ? "展现" : "隐藏")}</span><form class="inline-form" method="post" action="/admin/api/catalog/card-flag"><input type="hidden" name="enabled" value="true"><button ${catalogCardEnabled ? "disabled" : ""}>开启展现</button></form><form class="inline-form" method="post" action="/admin/api/catalog/card-flag"><input type="hidden" name="enabled" value="false"><button class="danger" ${catalogCardEnabled ? "" : "disabled"}>关闭展现</button></form><span class="muted">默认隐藏。开启后，符合条件（非 CN 地区、试用中、额度未用完、目录里有模型）的机器在工坊看到「免费获取示例模型」卡片；关闭立即隐藏，客户端下次启动生效。</span></div></div><div class="toolbar"><h2>产品报表</h2></div><table><thead><tr><th>产品 ID</th><th>产品</th><th>状态</th><th>套餐数</th><th>兑换码</th><th>活跃权益</th><th>激活设备</th><th>作废</th></tr></thead><tbody>${rows || `<tr><td colspan="8" class="muted">暂无数据</td></tr>`}</tbody></table>`
   );
 }
 

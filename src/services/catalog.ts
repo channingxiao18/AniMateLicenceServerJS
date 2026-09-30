@@ -20,7 +20,7 @@ import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { AwsClient } from "aws4fetch";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/index";
-import { catalogGrants, catalogModels, trialGrants } from "../db/schema";
+import { catalogGrants, catalogModels, catalogSettings, trialGrants } from "../db/schema";
 import { ActivationError, machineIdentityFromFingerprint, nowISO } from "./activation";
 
 type CatalogModel = typeof catalogModels.$inferSelect;
@@ -185,6 +185,36 @@ function parseDbDate(value: string): Date {
   return new Date(normalized);
 }
 
+// ─── Admin master flag (dashboard one-click show/hide) ────────────────────
+
+export const CARD_ENABLED_SETTING_KEY = "card_enabled";
+
+/**
+ * The dashboard master flag for the workshop card. **Default OFF** — until an
+ * admin enables it, the bootstrap flag reports disabled and the card stays
+ * hidden even with models uploaded. AND-ed with the deploy-level
+ * `CATALOG_ENABLED` env and the rest of the eligibility gates.
+ */
+export async function readCatalogCardEnabled(db: Database): Promise<boolean> {
+  const row = await db
+    .select()
+    .from(catalogSettings)
+    .where(eq(catalogSettings.key, CARD_ENABLED_SETTING_KEY))
+    .get();
+  return row?.value === "true";
+}
+
+export async function writeCatalogCardEnabled(db: Database, enabled: boolean): Promise<void> {
+  const value = enabled ? "true" : "false";
+  await db
+    .insert(catalogSettings)
+    .values({ key: CARD_ENABLED_SETTING_KEY, value, updatedAt: nowISO() })
+    .onConflictDoUpdate({
+      target: catalogSettings.key,
+      set: { value, updatedAt: nowISO() },
+    });
+}
+
 // ─── DB-backed operations ─────────────────────────────────────────────────
 
 async function usedGrantCount(db: Database, hashes: string[]): Promise<number> {
@@ -263,6 +293,10 @@ export async function catalogStatusFor(
   if (!config.catalogEnabled || !isCountryEligible(config, params.country)) {
     return { enabled: false, remaining: 0, max };
   }
+  // Admin master flag: default OFF until enabled from the dashboard.
+  if (!(await readCatalogCardEnabled(db))) {
+    return { enabled: false, remaining: 0, max };
+  }
   const enabledRows = await db
     .select({ count: sql<number>`count(*)` })
     .from(catalogModels)
@@ -296,6 +330,11 @@ export async function claimCatalogModel(
 ): Promise<CatalogClaimResponse> {
   if (!config.catalogEnabled) {
     throw new ActivationError("CATALOG_DISABLED", "模型获取暂未开放", 403);
+  }
+  // Defense in depth: the bootstrap flag already hides the card, but a direct
+  // claim still must not bypass the dashboard master flag.
+  if (!(await readCatalogCardEnabled(db))) {
+    throw new ActivationError("CATALOG_CARD_DISABLED", "模型获取暂未开放", 403);
   }
   if (!isCountryEligible(config, params.country)) {
     throw new ActivationError("REGION_NOT_ELIGIBLE", "当前地区暂未开放此功能", 403);

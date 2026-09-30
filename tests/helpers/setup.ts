@@ -318,6 +318,12 @@ CREATE TABLE IF NOT EXISTS catalog_grants (
 );
 CREATE INDEX IF NOT EXISTS catalog_grants_fingerprint_idx ON catalog_grants (fingerprint_hash);
 CREATE INDEX IF NOT EXISTS catalog_grants_model_idx ON catalog_grants (model_id);
+
+CREATE TABLE IF NOT EXISTS catalog_settings (
+  key text PRIMARY KEY NOT NULL,
+  value text NOT NULL,
+  updated_at text DEFAULT (datetime('now')) NOT NULL
+);
 `;
 
 export function createTestDb(): { sqlite: Database.Database; db: AppDb } {
