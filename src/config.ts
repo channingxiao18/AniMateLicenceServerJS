@@ -105,7 +105,10 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
       env.SESSION_SECRET ||
       "change_me_trial_fingerprint_salt",
     catalogEnabled: (env.CATALOG_ENABLED || "false").toLowerCase() === "true",
-    catalogExcludedCountries: (env.CATALOG_EXCLUDED_COUNTRIES || "CN")
+    // "" (explicitly set empty) means "no country exclusions" — only an unset
+    // var falls back to the default policy. `||` would make the empty form
+    // impossible to express.
+    catalogExcludedCountries: (env.CATALOG_EXCLUDED_COUNTRIES ?? "CN")
       .split(",")
       .map((s) => s.trim().toUpperCase())
       .filter(Boolean),
