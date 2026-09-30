@@ -35,7 +35,7 @@ TRIAL_TIME_CHECK_TOKEN = "animate-trial-time-check-v1"
 # uploaded and verified (scripts/catalog_upload.mjs).
 # Region gate decision: mainland China not open yet — country gate only;
 # app locale is NOT an exclusion criterion, it only picks content language.
-CATALOG_ENABLED = "false"
+CATALOG_ENABLED = "true"
 CATALOG_EXCLUDED_COUNTRIES = "CN"
 CATALOG_MAX_GRANTS_PER_MACHINE = "3"
 CATALOG_DOWNLOAD_URL_TTL_SECONDS = "900"

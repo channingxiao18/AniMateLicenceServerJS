@@ -251,6 +251,8 @@ async function readManifestObject(
  * Eligibility flag for the trial bootstrap response. Only called on the
  * startTrial success path (trial is active by construction); a disabled or
  * geo-excluded catalog yields enabled=false so the client hides the card.
+ * An EMPTY catalog (zero enabled models) also yields enabled=false — showing
+ * the card would only produce CATALOG_EMPTY failures on click.
  */
 export async function catalogStatusFor(
   db: Database,
@@ -259,6 +261,14 @@ export async function catalogStatusFor(
 ): Promise<CatalogStatus> {
   const max = Math.max(0, config.catalogMaxGrantsPerMachine);
   if (!config.catalogEnabled || !isCountryEligible(config, params.country)) {
+    return { enabled: false, remaining: 0, max };
+  }
+  const enabledRows = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(catalogModels)
+    .where(eq(catalogModels.enabled, true))
+    .all();
+  if (Number(enabledRows[0]?.count ?? 0) === 0) {
     return { enabled: false, remaining: 0, max };
   }
   const hashes = await catalogFingerprintHashCandidates(

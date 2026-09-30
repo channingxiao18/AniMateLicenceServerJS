@@ -364,3 +364,32 @@ describe("catalog status flag (trial bootstrap)", () => {
     ).toEqual({ enabled: true, remaining: 2, max: 3 });
   });
 });
+
+describe("catalog status with an empty catalog", () => {
+  it("hides the flag while zero models are enabled, shows once one is", async () => {
+    const env = await createTestEnv();
+    enableCatalog(env);
+    const params = { productId: "animate", fingerprint: "empty-catalog-machine", country: "US" as string | null };
+    await startTrialFor(env, params.fingerprint);
+
+    expect(await catalogStatusFor(env.db, env.config, params)).toEqual({
+      enabled: false,
+      remaining: 0,
+      max: 3,
+    });
+
+    await seedModel(env);
+    expect(await catalogStatusFor(env.db, env.config, params)).toEqual({
+      enabled: true,
+      remaining: 3,
+      max: 3,
+    });
+
+    await env.db.update(catalogModels).set({ enabled: false }).where(eq(catalogModels.id, "mdl_test"));
+    expect(await catalogStatusFor(env.db, env.config, params)).toEqual({
+      enabled: false,
+      remaining: 0,
+      max: 3,
+    });
+  });
+});
