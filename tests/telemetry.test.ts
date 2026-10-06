@@ -583,3 +583,66 @@ describe("telemetry unclean session reporting", () => {
     expect(rows).toHaveLength(4);
   });
 });
+
+// Lever 1 (one-click sample model card). Both registries have to know these
+// five names: EVENT_NAMES gates ingest, PRODUCT_EVENT_NAMES is the candidate
+// set the machine_active mark, the per-(day, install) device view and the
+// product report's raw event load all read. Missing from the first, the funnel
+// is rejected at the door; missing from the second, it is stored but invisible.
+// See docs/reports/用户行为遥测分析-0.12.2-2026-10-06.md §3.4.
+describe("telemetry catalog card funnel (lever 1)", () => {
+  const catalogEvents = [
+    "catalog_card_shown",
+    "catalog_claim_clicked",
+    "catalog_claim_result",
+    "catalog_download_result",
+    "catalog_model_imported",
+  ];
+
+  it("accepts every step of the catalog funnel the desktop client sends", async () => {
+    const env = await createTestEnv();
+    const base = event();
+    for (const [index, eventName] of catalogEvents.entries()) {
+      const result = await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+        ...base,
+        event_id: `c0000005-0000-4000-8000-00000000000${index}`,
+        event: eventName,
+        payload: { model_id: "mdl_changli", remaining: 2 },
+      });
+      expect(result).toEqual({ ok: true });
+    }
+
+    const rows = await env.db.select().from(telemetryEvents).all();
+    expect(rows.map((row) => row.event).sort()).toEqual([...catalogEvents].sort());
+  });
+
+  it("keeps a catalog event inside the daily device view candidate set", async () => {
+    const env = await createTestEnv();
+    const day = "2026-08-15";
+    const installId = "44444444-4444-4444-8444-444444444444";
+    // Inserted directly: ingest is already covered above, and this test is
+    // about PRODUCT_EVENT_NAMES (the reader), not the EVENT_NAMES gate.
+    await env.db.insert(telemetryEvents).values({
+      eventId: "c0000006-0000-4000-8000-000000000001",
+      schemaVersion: 1,
+      event: "catalog_card_shown",
+      sourceId: "desktop_prod",
+      receivedAt: `${day} 10:00:00`,
+      receivedAtUnix: Math.floor(Date.parse("2026-08-15T10:00:00Z") / 1000),
+      sentAt: Math.floor(Date.parse("2026-08-15T10:00:00Z") / 1000),
+      productId: "animate",
+      appVersion: "0.12.2",
+      platform: "windows",
+      channel: "official",
+      machineHash,
+      installId,
+      licenseState: "trial",
+      payloadJson: JSON.stringify({ remaining: 2 }),
+      rawJson: "{}",
+    });
+
+    const listed = await listActiveDevicesForDay(env.db, { day, productId: "animate" });
+    expect(listed.total).toBe(1);
+    expect(listed.items[0].installId).toBe(installId);
+  });
+});

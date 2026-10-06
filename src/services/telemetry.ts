@@ -90,6 +90,16 @@ const EVENT_NAMES = new Set([
   "ai_provider_validated",
   "ai_provider_removed",
   "ai_provider_default_changed",
+  // --- Catalog card funnel (lever 1: one-click sample model, AniMate repo) ---
+  // These five were missing from the ingest gate, so every step of the card
+  // funnel answered INVALID_EVENT while the card itself was still switched off
+  // server-side. Found before the card was enabled (2026-10-06 telemetry report
+  // P0-2); the client has emitted all five since 0.12.0 (CatalogModelCard.tsx).
+  "catalog_card_shown",
+  "catalog_claim_clicked",
+  "catalog_claim_result",
+  "catalog_download_result",
+  "catalog_model_imported",
 ]);
 
 const LICENSE_STATES = new Set([
@@ -214,6 +224,16 @@ const PRODUCT_EVENT_NAMES = [
   "ai_provider_validated",
   "ai_provider_removed",
   "ai_provider_default_changed",
+  // --- Catalog card funnel (lever 1: one-click sample model, AniMate repo) ---
+  // Must be listed here as well as in EVENT_NAMES, for the same three readers
+  // documented above: the `machine_active` daily-unique mark, the per-(day,
+  // install) device view, and the product report's raw event load. Being only
+  // in EVENT_NAMES would store the funnel and still report zero.
+  "catalog_card_shown",
+  "catalog_claim_clicked",
+  "catalog_claim_result",
+  "catalog_download_result",
+  "catalog_model_imported",
 ] as const;
 
 type ProductEvent = {
