@@ -439,6 +439,90 @@ describe("telemetry", () => {
   });
 });
 
+describe("telemetry visible secs field compatibility (0.12.2 rename)", () => {
+  it("accepts a 0.12.2 heartbeat carrying companion_visible_secs and counts its visible delta", async () => {
+    const env = await createTestEnv();
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", event());
+    await recordTelemetryEvent(
+      env.db,
+      env.config,
+      "animate-desktop-prod-v1",
+      event({
+        event_id: "c0000001-0000-4000-8000-000000000001",
+        event: "session_heartbeat",
+        payload: {
+          seq: 1,
+          process_duration_secs: 900,
+          companion_visible_secs: 600,
+        },
+      })
+    );
+    await recordTelemetryEvent(
+      env.db,
+      env.config,
+      "animate-desktop-prod-v1",
+      event({
+        event_id: "c0000001-0000-4000-8000-000000000002",
+        event: "session_heartbeat",
+        payload: {
+          seq: 2,
+          process_duration_secs: 1200,
+          companion_visible_secs: 900,
+        },
+      })
+    );
+
+    const state = await env.db
+      .select()
+      .from(telemetrySessionState)
+      .where(eq(telemetrySessionState.sessionId, "33333333-3333-4333-8333-333333333333"))
+      .get();
+    expect(state?.lastOverlayVisibleSecs).toBe(900);
+
+    const metrics = await env.db.select().from(telemetryDailyMetrics).all();
+    expect(metrics.reduce((sum, row) => sum + row.activeSecs, 0)).toBe(1200);
+    expect(metrics.reduce((sum, row) => sum + row.overlayVisibleSecs, 0)).toBe(900);
+  });
+
+  it("accepts a 0.12.2 session_end carrying companion_visible_secs", async () => {
+    const env = await createTestEnv();
+    const sessionId = "c0000002-0000-4000-8000-000000000002";
+    const base = event({ install_id: "c0000002-0000-4000-8000-00000000fff2", session_id: sessionId });
+    const receivedAt = new Date("2026-08-15T10:00:00.000Z");
+
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "c0000002-0000-4000-8000-00000000000a",
+      event: "session_start",
+      payload: { started_at: Math.floor(receivedAt.getTime() / 1000) },
+    }, receivedAt);
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "c0000002-0000-4000-8000-00000000000b",
+      event: "session_end",
+      payload: { process_duration_secs: 90, companion_visible_secs: 30, reason: "user_exit" },
+    }, new Date(receivedAt.getTime() + 90000));
+
+    const report = await getStartupDiagnostics(env.db, { day: "2026-08-15", productId: "animate" });
+    expect(report.rows).toHaveLength(1);
+    expect(report.rows[0]).toMatchObject({ processSecs: 90, diagnosis: "no_1m_checkpoint" });
+  });
+
+  it("rejects a heartbeat with neither visible secs field", async () => {
+    const env = await createTestEnv();
+    await expect(
+      recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", event({
+        event_id: "c0000003-0000-4000-8000-000000000003",
+        event: "session_heartbeat",
+        payload: { seq: 1, process_duration_secs: 900 },
+      }))
+    ).rejects.toMatchObject({
+      error: "INVALID_PAYLOAD",
+      statusCode: 400,
+    });
+  });
+});
+
 describe("telemetry unclean session reporting", () => {
   it("records session_unclean_end and attributes durations to the crashed session", async () => {
     const env = await createTestEnv();

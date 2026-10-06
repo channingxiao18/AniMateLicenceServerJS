@@ -393,19 +393,11 @@ function validateEventRequirements(
   if (event === "session_heartbeat" || event === "session_checkpoint") {
     requirePayloadInteger(params.payload, "seq");
     requirePayloadInteger(params.payload, "process_duration_secs");
-    if (event === "session_heartbeat") {
-      requirePayloadInteger(params.payload, "overlay_visible_secs");
-    } else {
-      requirePayloadInteger(params.payload, "companion_visible_secs");
-    }
+    requireVisibleSecs(params.payload, event);
   }
   if (event === "session_end" || event === "session_unclean_end") {
     requirePayloadInteger(params.payload, "process_duration_secs");
-    if (event === "session_end") {
-      requirePayloadInteger(params.payload, "overlay_visible_secs");
-    } else {
-      requirePayloadInteger(params.payload, "companion_visible_secs");
-    }
+    requireVisibleSecs(params.payload, event);
   }
 }
 
@@ -516,12 +508,7 @@ async function updateSessionState(
   if (!envelope.sessionId) return { activeSecs: 0, overlayVisibleSecs: 0 };
 
   const processDuration = safePayloadDuration(envelope.payload, "process_duration_secs");
-  const overlayDuration = safePayloadDuration(
-    envelope.payload,
-    envelope.event === "session_checkpoint" || envelope.event === "session_unclean_end"
-      ? "companion_visible_secs"
-      : "overlay_visible_secs"
-  );
+  const overlayDuration = sessionVisibleSecs(envelope.payload, envelope.event);
   const sessionId = envelope.sessionId;
   const startedAt = numberFromPayload(envelope.payload.started_at) ?? envelope.sentAt ?? receivedAtUnix;
 
@@ -1079,7 +1066,7 @@ export async function getTelemetryMachineUsage(
     if (row.sessionId) {
       const previous = sessionDurations.get(row.sessionId) || { process: 0, overlay: 0 };
       const process = safePayloadDuration(payload, "process_duration_secs");
-      const overlay = safePayloadDuration(payload, "overlay_visible_secs");
+      const overlay = sessionVisibleSecs(payload, row.event);
       if (process > previous.process) current.activeSecs += process - previous.process;
       if (overlay > previous.overlay) current.overlayVisibleSecs += overlay - previous.overlay;
       sessionDurations.set(row.sessionId, {
@@ -1188,7 +1175,7 @@ export async function getTelemetryInstallDetail(
     const payload = telemetryPayload(row);
     if (!row.sessionId || !["session_heartbeat", "session_checkpoint", "session_end", "session_unclean_end"].includes(row.event)) continue;
     const process = safePayloadDuration(payload, "process_duration_secs");
-    const visible = safePayloadDuration(payload, row.event === "session_checkpoint" || row.event === "session_unclean_end" || row.event === "session_unclean_detected" ? "companion_visible_secs" : "overlay_visible_secs");
+    const visible = sessionVisibleSecs(payload, row.event);
     const previous = sessionMax.get(row.sessionId) || { process: 0, overlay: 0 };
     activeSecs += boundedDelta(process, previous.process);
     overlayVisibleSecs += boundedDelta(visible, previous.overlay);
@@ -1319,7 +1306,7 @@ async function listTelemetryUsersUncached(
     if (row.sessionId && ["session_heartbeat", "session_checkpoint", "session_end", "session_unclean_end", "session_unclean_detected"].includes(row.event)) {
       const payload = telemetryPayload(row);
       const process = safePayloadDuration(payload, "process_duration_secs");
-      const visible = safePayloadDuration(payload, row.event === "session_checkpoint" || row.event === "session_unclean_end" || row.event === "session_unclean_detected" ? "companion_visible_secs" : "overlay_visible_secs");
+      const visible = sessionVisibleSecs(payload, row.event);
       const previous = sessionState.get(row.sessionId) || { machineHash: row.machineHash, process: 0, overlay: 0, startedAt: row.receivedAt, lastAt: row.receivedAt };
       current.activeSecs += boundedDelta(process, previous.process);
       current.overlayVisibleSecs += boundedDelta(visible, previous.overlay);
@@ -1642,10 +1629,7 @@ async function loadDailyDeviceActivity(
         let payload: Record<string, unknown> = {};
         try { payload = JSON.parse(event.payloadJson); } catch { /* Ignore malformed history. */ }
         const process = safePayloadDuration(payload, "process_duration_secs");
-        const visibleKey = event.event === "session_checkpoint" || event.event === "session_unclean_end" || event.event === "session_unclean_detected"
-          ? "companion_visible_secs"
-          : "overlay_visible_secs";
-        const visible = safePayloadDuration(payload, visibleKey);
+        const visible = sessionVisibleSecs(payload, event.event);
         const previous = sessionDurations.get(event.sessionId) || { process: 0, visible: 0 };
         if (process >= previous.process || visible >= previous.visible) {
           sessionDurations.set(event.sessionId, {
@@ -1689,10 +1673,7 @@ async function loadDailyDeviceActivity(
       let payload: Record<string, unknown> = {};
       try { payload = JSON.parse(event.payloadJson); } catch { /* Ignore malformed history. */ }
       const process = safePayloadDuration(payload, "process_duration_secs");
-      const visibleKey = event.event === "session_checkpoint" || event.event === "session_unclean_end" || event.event === "session_unclean_detected"
-        ? "companion_visible_secs"
-        : "overlay_visible_secs";
-      const visible = safePayloadDuration(payload, visibleKey);
+      const visible = sessionVisibleSecs(payload, event.event);
       const previous = sessionDurations.get(event.sessionId) || { process: 0, visible: 0 };
       row.activeSecs += boundedDelta(process, previous.process);
       row.overlayVisibleSecs += boundedDelta(visible, previous.visible);
@@ -1769,12 +1750,7 @@ async function loadLifetimeUsageByInstall(
     let payload: Record<string, unknown> = {};
     try { payload = JSON.parse(event.payloadJson); } catch { /* Ignore malformed history. */ }
     const process = safePayloadDuration(payload, "process_duration_secs");
-    const visible = safePayloadDuration(
-      payload,
-      event.event === "session_checkpoint" || event.event === "session_unclean_end"
-        ? "companion_visible_secs"
-        : "overlay_visible_secs",
-    );
+    const visible = sessionVisibleSecs(payload, event.event);
     const previous = sessionMax.get(event.sessionId) || { process: 0, overlay: 0, installId: event.installId };
     const current = result.get(event.installId) || { activeSecs: 0, overlayVisibleSecs: 0 };
     current.activeSecs += boundedDelta(process, previous.process);
@@ -2134,6 +2110,37 @@ function safePayloadDuration(payload: Record<string, unknown>, field: string): n
   const n = Number(payload[field]);
   if (!Number.isInteger(n) || n < 0 || n > MAX_DURATION_SECS) return 0;
   return n;
+}
+
+// 0.12.2（AniMate 3f50400）把全部会话事件的可见时长字段统一为
+// `companion_visible_secs`，而 ≤0.12.0 的客户端在 heartbeat/session_end 上
+// 仍发旧名 `overlay_visible_secs`（checkpoint/unclean 系事件一直用新名）。
+// 校验与读取都必须走这两个助手：新名优先、旧名兜底，一次部署兼容各代客户端。
+// 否则会出现 0.12.2 心跳/干净退出被整版本拒收的事故（2026-10-06 遥测分析 P0-1）。
+const COMPANION_ONLY_VISIBLE_EVENTS = new Set([
+  "session_checkpoint",
+  "session_unclean_end",
+  "session_unclean_detected",
+]);
+
+function requireVisibleSecs(payload: Record<string, unknown>, event: string): number {
+  if (COMPANION_ONLY_VISIBLE_EVENTS.has(event)) {
+    return requirePayloadInteger(payload, "companion_visible_secs");
+  }
+  if (payload.companion_visible_secs !== undefined) {
+    return requirePayloadInteger(payload, "companion_visible_secs");
+  }
+  return requirePayloadInteger(payload, "overlay_visible_secs");
+}
+
+function sessionVisibleSecs(payload: Record<string, unknown>, event: string): number {
+  if (COMPANION_ONLY_VISIBLE_EVENTS.has(event)) {
+    return safePayloadDuration(payload, "companion_visible_secs");
+  }
+  if (payload.companion_visible_secs !== undefined) {
+    return safePayloadDuration(payload, "companion_visible_secs");
+  }
+  return safePayloadDuration(payload, "overlay_visible_secs");
 }
 
 function numberFromPayload(value: unknown): number | null {
