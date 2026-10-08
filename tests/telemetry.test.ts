@@ -646,3 +646,67 @@ describe("telemetry catalog card funnel (lever 1)", () => {
     expect(listed.items[0].installId).toBe(installId);
   });
 });
+
+// Storage honesty + language picker (AniMate 0.12.5,
+// docs/plans/语言选择卡事件风暴与状态失忆问题分析-2026-10-07.md). Same two-registry rule as the
+// catalog funnel above: EVENT_NAMES gates ingest, PRODUCT_EVENT_NAMES is what the machine_active
+// mark, the per-(day, install) device view and the product report's raw load read.
+//
+// The failure mode here is worse than a missing number: the desktop client only treats HTTP_413 as
+// "the server refused this event" — a 400 is deferred and replayed, so an unlisted name keeps
+// answering INVALID_EVENT forever and pins its event in the local queue.
+describe("telemetry storage honesty + language picker events", () => {
+  const honestyEvents = [
+    "storage_read_failed",
+    "storage_write_failed",
+    "language_picker_shown",
+  ];
+
+  it("accepts the events the 0.12.5 client sends instead of answering INVALID_EVENT", async () => {
+    const env = await createTestEnv();
+    const base = event();
+    for (const [index, eventName] of honestyEvents.entries()) {
+      const result = await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+        ...base,
+        event_id: `d0000005-0000-4000-8000-00000000000${index}`,
+        event: eventName,
+        payload: { code: "STORAGE_WRITE_FAILED", file: "state.json" },
+      });
+      expect(result).toEqual({ ok: true });
+    }
+
+    const rows = await env.db.select().from(telemetryEvents).all();
+    expect(rows.map((row) => row.event).sort()).toEqual([...honestyEvents].sort());
+  });
+
+  it("keeps a storage-honesty event inside the daily device view candidate set", async () => {
+    const env = await createTestEnv();
+    const day = "2026-08-16";
+    const installId = "55555555-5555-4555-8555-555555555555";
+    const machineHash = "b".repeat(64);
+    // Inserted directly: ingest is covered above, and this test is about
+    // PRODUCT_EVENT_NAMES (the reader), not the EVENT_NAMES gate.
+    await env.db.insert(telemetryEvents).values({
+      eventId: "d0000006-0000-4000-8000-000000000001",
+      schemaVersion: 2,
+      event: "storage_write_failed",
+      sourceId: "desktop_prod",
+      receivedAt: `${day} 10:00:00`,
+      receivedAtUnix: Math.floor(Date.parse("2026-08-16T10:00:00Z") / 1000),
+      sentAt: Math.floor(Date.parse("2026-08-16T10:00:00Z") / 1000),
+      productId: "animate",
+      appVersion: "0.12.5",
+      platform: "windows",
+      channel: "official",
+      machineHash,
+      installId,
+      licenseState: "active",
+      payloadJson: JSON.stringify({ code: "STORAGE_WRITE_FAILED", file: "state.json" }),
+      rawJson: "{}",
+    });
+
+    const listed = await listActiveDevicesForDay(env.db, { day, productId: "animate" });
+    expect(listed.total).toBe(1);
+    expect(listed.items[0].installId).toBe(installId);
+  });
+});

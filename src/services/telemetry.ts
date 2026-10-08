@@ -100,6 +100,15 @@ const EVENT_NAMES = new Set([
   "catalog_claim_result",
   "catalog_download_result",
   "catalog_model_imported",
+  // --- Storage honesty + language picker (AniMate repo) ---
+  // docs/plans/语言选择卡事件风暴与状态失忆问题分析-2026-10-07.md, shipped in 0.12.5.
+  // Missing here each one answers 400 INVALID_EVENT, and the client only drops HTTP_413
+  // as unprocessable — every other 4xx is deferred and replayed, so the event would sit
+  // in the local queue (telemetry.json) forever while the same 400 repeats on each flush.
+  // `storage_write_failed` fires on a transient file lock, i.e. it can happen to any install.
+  "storage_read_failed",
+  "storage_write_failed",
+  "language_picker_shown",
 ]);
 
 const LICENSE_STATES = new Set([
@@ -234,6 +243,14 @@ const PRODUCT_EVENT_NAMES = [
   "catalog_claim_result",
   "catalog_download_result",
   "catalog_model_imported",
+  // --- Storage honesty + language picker (AniMate repo) ---
+  // Must be listed here as well as in EVENT_NAMES, for the same three readers
+  // documented above: the `machine_active` daily-unique mark, the per-(day,
+  // install) device view, and the product report's raw event load. Being only in
+  // EVENT_NAMES would accept the events and still report zero for them.
+  "storage_read_failed",
+  "storage_write_failed",
+  "language_picker_shown",
 ] as const;
 
 type ProductEvent = {
