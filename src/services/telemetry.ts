@@ -14,7 +14,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const PRODUCT_RE = /^[a-z0-9_-]{1,64}$/;
 const MACHINE_HASH_RE = /^[0-9a-f]{64}$/i;
 
-const EVENT_NAMES = new Set([
+// Exported so `tests/telemetry_event_names.test.ts` can check it against the client snapshot
+// (`tests/fixtures/telemetry-client-event-names.json`) without re-parsing this file.
+export const EVENT_NAMES = new Set([
   "install_seen",
   "session_start",
   "session_heartbeat",
@@ -164,7 +166,8 @@ type MetricDimensions = {
 
 export type TelemetryEventRow = typeof telemetryEvents.$inferSelect;
 
-const PRODUCT_EVENT_NAMES = [
+// Exported for the same reason as EVENT_NAMES above: the client snapshot test imports it.
+export const PRODUCT_EVENT_NAMES = [
   "model_import_clicked",
   "model_import_picker_opened",
   "model_import_completed",
