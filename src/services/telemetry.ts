@@ -111,6 +111,9 @@ export const EVENT_NAMES = new Set([
   "storage_read_failed",
   "storage_write_failed",
   "language_picker_shown",
+  // Feature recall card (AniMate docs/plans/功能召回通用框架-实现计划-2026-10-08.md).
+  // One name carries the whole funnel; `stage` (shown/accept/dismiss) splits it.
+  "feature_recall",
 ]);
 
 const LICENSE_STATES = new Set([
@@ -254,6 +257,10 @@ export const PRODUCT_EVENT_NAMES = [
   "storage_read_failed",
   "storage_write_failed",
   "language_picker_shown",
+  // --- Feature recall (AniMate repo) ---
+  // Listed here as well as in EVENT_NAMES: being only in EVENT_NAMES would accept
+  // the events and still report zero for them (same three readers as above).
+  "feature_recall",
 ] as const;
 
 type ProductEvent = {
