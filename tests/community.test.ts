@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
+import { readFileSync } from "node:fs";
 import { createTestEnv } from "./helpers/setup";
 import { communitySettings } from "../src/db/schema";
+import * as schema from "../src/db/schema";
+import type { Database as AppDb } from "../src/db/index";
 import {
   COMMUNITY_KEYS,
   readCommunityInfo,
@@ -99,6 +104,51 @@ describe("community info service", () => {
     // 0 means "newest response wins" on the client; throwing here would make the whole
     // route 500 over a single bad row.
     await expect(readCommunityInfo(env.db)).resolves.toMatchObject({ revision: 0 });
+  });
+});
+
+describe("migration 0012", () => {
+  /**
+   * Applies the real migration file to a fresh database.
+   *
+   * The seeded rows are the values production will serve before any admin touches them, and
+   * a typo'd key or a missing row is invisible until a client silently shows no community
+   * entry. Asserting the shipped literals here (and the mirrored compile-time defaults in
+   * `AniMate/src-tauri/src/community.rs`) is what makes a one-sided change fail loudly.
+   */
+  function migratedDb(): AppDb {
+    const sqlite = new Database(":memory:");
+    sqlite.exec(
+      readFileSync(
+        new URL("../migrations/0012_community_settings.sql", import.meta.url),
+        "utf8"
+      )
+    );
+    return drizzle(sqlite, { schema }) as unknown as AppDb;
+  }
+
+  it("ships the QQ group configured and Discord deliberately left empty", async () => {
+    await expect(readCommunityInfo(migratedDb())).resolves.toEqual({
+      revision: 1,
+      qq_group_number: "1129250160",
+      qq_join_url: "https://qm.qq.com/q/SzedH1r18O",
+      discord_invite_url: "",
+    });
+  });
+
+  it("uses the key names the service reads", async () => {
+    const db = migratedDb();
+    const rows = await db.select().from(communitySettings).all();
+
+    // A seeded key the service does not look up would read as "unconfigured" forever.
+    expect(rows.map((row) => row.key).sort()).toEqual(
+      [
+        COMMUNITY_KEYS.revision,
+        COMMUNITY_KEYS.qqGroupNumber,
+        COMMUNITY_KEYS.qqJoinUrl,
+        COMMUNITY_KEYS.discordInviteUrl,
+      ].sort()
+    );
   });
 });
 
