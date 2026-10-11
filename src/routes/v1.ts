@@ -28,6 +28,7 @@ import {
 import { products } from "../db/schema";
 import { eq } from "drizzle-orm";
 import { FeedbackError, feedbackCountForMachine, recordFeedback, validateFeedbackBody } from "../services/feedback";
+import { readCommunityInfo } from "../services/community";
 
 type ClientBody = {
   product_id?: string;
@@ -610,6 +611,29 @@ export function createV1Router(
         return c.json(activationErrorBody(err), statusFor(err));
       }
       console.error("Status error:", err);
+      return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
+    }
+  });
+
+  // Official community entry config (QQ group / Discord). Public and identity-free on
+  // purpose: the entry has to work on a machine that never started a trial, so this
+  // route asks for no fingerprint and no licence token.
+  //
+  // No rate limiter: a limiter keyed on IP would punish every machine behind one NAT
+  // (offices, schools, shared connections) for a request that happens once per launch
+  // and reads four tiny rows. Abuse is covered by Cloudflare's edge, and the client
+  // treats any failure as "keep the local value" rather than as an error.
+  //
+  // `no-store` because the operator expects a group-number change to propagate within
+  // one launch cycle. The client's `revision` guard is the second line of defence for
+  // intermediaries that ignore it.
+  router.get("/community/info", async (c) => {
+    try {
+      const info = await readCommunityInfo(db);
+      c.header("Cache-Control", "no-store");
+      return c.json(info);
+    } catch (err) {
+      console.error("Community info error:", err);
       return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
     }
   });

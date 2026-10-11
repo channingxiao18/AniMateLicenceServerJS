@@ -114,6 +114,11 @@ export const EVENT_NAMES = new Set([
   // Feature recall card (AniMate docs/plans/功能召回通用框架-实现计划-2026-10-08.md).
   // One name carries the whole funnel; `stage` (shown/accept/dismiss) splits it.
   "feature_recall",
+  // Official community entry (QQ / Discord, AniMate docs/plans/社群入口设计-QQ与Discord-2026-10-08.md).
+  // `community_entry_shown` splits exposure by surface; `community_link_clicked` carries
+  // channel + action (copy counts as a click — it is the converting action for QQ).
+  "community_entry_shown",
+  "community_link_clicked",
 ]);
 
 const LICENSE_STATES = new Set([
@@ -261,6 +266,13 @@ export const PRODUCT_EVENT_NAMES = [
   // Listed here as well as in EVENT_NAMES: being only in EVENT_NAMES would accept
   // the events and still report zero for them (same three readers as above).
   "feature_recall",
+  // --- Official community entry (AniMate repo) ---
+  // Listed here as well as in EVENT_NAMES, for the same three readers documented
+  // above: the `machine_active` daily-unique mark, the per-(day, install) device
+  // view, and the product report's raw event load. Being only in EVENT_NAMES would
+  // accept the funnel and still report zero for it.
+  "community_entry_shown",
+  "community_link_clicked",
 ] as const;
 
 type ProductEvent = {

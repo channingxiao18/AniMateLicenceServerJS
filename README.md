@@ -46,6 +46,7 @@ npm run dev
 - `POST /v1/trials/start` — 领取一次性试用授权
 - `POST /v1/deactivate` — 停用许可证
 - `POST /v1/refresh` — 刷新授权令牌
+- `GET /v1/community/info` — 官方社群（QQ 群 / Discord）远程配置；公开、无身份、无频控，客户端每次启动拉一次，拉不到就用本地缓存 / 编译期默认值
 
 ### 管理后台
 - `GET /admin/` — 仪表板
@@ -59,6 +60,11 @@ npm run dev
 - `POST /admin/api/orders/:id/deactivate` — 停用授权
 - `POST /admin/api/orders/:id/revoke` — 作废订单
 - `POST /admin/api/orders/:id/reactivate` — 重新激活
+- `GET|POST /admin/api/community/info` — 读 / 改官方社群配置（QQ 群号、加群链接、Discord 邀请链接）
+
+> 改社群配置请走这个接口，不要直接 `UPDATE community_settings` 的内容行：接口会同时递增
+> `revision`，客户端靠它判断"这是新配置"而不是"CDN 还挂着旧响应"。详见
+> `AniMate/docs/plans/社群入口设计-QQ与Discord-2026-10-08.md` §8.5。
 
 ### 其他
 - `GET /health` — 健康检查

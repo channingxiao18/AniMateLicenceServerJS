@@ -398,6 +398,17 @@ export const catalogSettings = sqliteTable("catalog_settings", {
   updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
 });
 
+// Official community entry config (QQ group / Discord) — key-value for the same
+// reason as catalog_settings: changing a group number must not need a client
+// release. Absent/empty key = that channel is unconfigured and the client hides
+// it (falling back to its own compiled-in default). Read by the client once per
+// launch via GET /v1/community/info; written from the admin dashboard.
+export const communitySettings = sqliteTable("community_settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
+});
+
 // Random sample-model catalog for trial machines (Lever 1, 2026-09-29 plan).
 // `catalog_models` holds runtime selection fields only — the copy payload
 // (name/tags i18n, license note) lives in each model's manifest.json object in

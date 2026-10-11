@@ -29,6 +29,7 @@ import {
 } from "../services/activation";
 import { parsePlanFeatures } from "../services/plan_features";
 import { readCatalogCardEnabled, writeCatalogCardEnabled } from "../services/catalog";
+import { readCommunityInfo, writeCommunityInfo } from "../services/community";
 import { deleteTrialGrant } from "../services/trial";
 
 import type { ProviderRegistry } from "../services/provider";
@@ -415,6 +416,49 @@ export function createAdminApiRouter(db: Database, _config: AppConfig, registry:
       const enabled = raw === true || raw === "true" || raw === "1";
       await writeCatalogCardEnabled(db, enabled);
       return okOrRedirect(c, { status: "ok", enabled });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  // Official community entry config (QQ group / Discord). Read for the dashboard,
+  // written to change a group number without shipping a client build.
+  //
+  // Empty string is a legitimate value meaning "this channel is unconfigured" — the
+  // client hides it. Only the three content fields are patchable; `revision` is bumped
+  // by writeCommunityInfo itself so an operator cannot publish content under a stale
+  // order stamp (the client would then reject the change as a rollback).
+  router.get("/community/info", async (c) => {
+    try {
+      return c.json(await readCommunityInfo(db));
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  router.post("/community/info", async (c) => {
+    try {
+      const body = await readBody(c);
+      const patch: {
+        qq_group_number?: string;
+        qq_join_url?: string;
+        discord_invite_url?: string;
+      } = {};
+      for (const field of ["qq_group_number", "qq_join_url", "discord_invite_url"] as const) {
+        const raw = body[field];
+        if (raw === undefined) continue;
+        if (typeof raw !== "string") {
+          return c.json({ error: "INVALID_REQUEST", message: `${field} 必须是字符串` }, 400);
+        }
+        patch[field] = raw;
+      }
+      if (Object.keys(patch).length === 0) {
+        return c.json(
+          { error: "INVALID_REQUEST", message: "至少提供一个待更新字段" },
+          400
+        );
+      }
+      return okOrRedirect(c, await writeCommunityInfo(db, patch));
     } catch (err) {
       return errorResponse(c, err);
     }
