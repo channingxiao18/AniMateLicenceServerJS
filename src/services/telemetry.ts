@@ -118,6 +118,10 @@ export const EVENT_NAMES = new Set([
   // `community_entry_shown` splits exposure by surface; `community_link_clicked` carries
   // channel + action (copy counts as a click — it is the converting action for QQ).
   "community_entry_shown",
+  // `community_entry_clicked` is the middle funnel step: the right-click menu item opens the
+  // Settings modal at 系统与关于, and its click was previously invisible because the settings
+  // block's exposure is deduped per process. Added 2026-10-10.
+  "community_entry_clicked",
   "community_link_clicked",
 ]);
 
@@ -272,6 +276,7 @@ export const PRODUCT_EVENT_NAMES = [
   // view, and the product report's raw event load. Being only in EVENT_NAMES would
   // accept the funnel and still report zero for it.
   "community_entry_shown",
+  "community_entry_clicked",
   "community_link_clicked",
 ] as const;
 
