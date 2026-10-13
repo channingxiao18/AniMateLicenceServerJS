@@ -19,6 +19,7 @@ import { getAesKey, aesDecrypt } from "../crypto/aes";
 import { parseLicenceOuter, parseLicenceInner } from "../licence/codec";
 import { recordTelemetryEvent, TelemetryError } from "../services/telemetry";
 import { startTrial } from "../services/trial";
+import { issueTrialLlmProfile } from "../services/llm_trial";
 import {
   catalogStatusFor,
   claimCatalogModel,
@@ -180,42 +181,27 @@ export function createV1Router(
   catalogBucket?: CatalogObjectStore | null
 ): Hono {
   const router = new Hono();
-  const rateLimiter = createRateLimiter({
+  const limiterConfig = {
     ipMax: config.activateRateLimitIpMax,
     ipWindowSeconds: config.activateRateLimitIpWindowSeconds,
     ipFailMax: config.activateRateLimitIpFailMax,
     ipFailWindowSeconds: config.activateRateLimitIpFailWindowSeconds,
     orderFailMax: config.activateRateLimitOrderFailMax,
     orderFailWindowSeconds: config.activateRateLimitOrderFailWindowSeconds,
+  };
+  const rateLimiter = createRateLimiter(limiterConfig);
+  const trialRateLimiter = createRateLimiter(limiterConfig, {
+    errorCode: "TRIAL_RATE_LIMITED",
+    message: "请求过于频繁，请稍后再试",
   });
-  const trialRateLimiter = createRateLimiter(
-    {
-      ipMax: config.activateRateLimitIpMax,
-      ipWindowSeconds: config.activateRateLimitIpWindowSeconds,
-      ipFailMax: config.activateRateLimitIpFailMax,
-      ipFailWindowSeconds: config.activateRateLimitIpFailWindowSeconds,
-      orderFailMax: config.activateRateLimitOrderFailMax,
-      orderFailWindowSeconds: config.activateRateLimitOrderFailWindowSeconds,
-    },
-    {
-      errorCode: "TRIAL_RATE_LIMITED",
-      message: "请求过于频繁，请稍后再试",
-    }
-  );
-  const catalogRateLimiter = createRateLimiter(
-    {
-      ipMax: config.activateRateLimitIpMax,
-      ipWindowSeconds: config.activateRateLimitIpWindowSeconds,
-      ipFailMax: config.activateRateLimitIpFailMax,
-      ipFailWindowSeconds: config.activateRateLimitIpFailWindowSeconds,
-      orderFailMax: config.activateRateLimitOrderFailMax,
-      orderFailWindowSeconds: config.activateRateLimitOrderFailWindowSeconds,
-    },
-    {
-      errorCode: "CATALOG_RATE_LIMITED",
-      message: "请求过于频繁，请稍后再试",
-    }
-  );
+  const catalogRateLimiter = createRateLimiter(limiterConfig, {
+    errorCode: "CATALOG_RATE_LIMITED",
+    message: "请求过于频繁，请稍后再试",
+  });
+  const llmTrialRateLimiter = createRateLimiter(limiterConfig, {
+    errorCode: "TRIAL_LLM_RATE_LIMITED",
+    message: "请求过于频繁，请稍后再试",
+  });
 
   router.use("/activate", rateLimiter);
   router.use("/refresh", rateLimiter);
@@ -223,6 +209,7 @@ export function createV1Router(
   router.use("/license/status", rateLimiter);
   router.use("/trials/start", trialRateLimiter);
   router.use("/trials/time-check", trialRateLimiter);
+  router.use("/llm/trial-profile", llmTrialRateLimiter);
   router.use("/models/catalog/claim", catalogRateLimiter);
   router.use("/models/catalog/report", catalogRateLimiter);
 
@@ -397,6 +384,51 @@ export function createV1Router(
       return c.json({ server_time: Math.floor(Date.now() / 1000) });
     } catch (err) {
       console.error("Trial time-check error:", err);
+      return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
+    }
+  });
+
+  /**
+   * Trial LLM key issuance (docs/plans/trial-llm-key-plan.md §3.1).
+   *
+   * Idempotent per machine: the client re-requests this on every cold start to
+   * sync manual revocations, and gets the SAME key back while it is usable.
+   */
+  router.post("/llm/trial-profile", async (c) => {
+    const limiter = c.get("rateLimiter") as ActivateRateLimiter;
+    const ip = c.get("clientIp") as string;
+
+    let body: ClientBody;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "INVALID_REQUEST", message: "请求体格式无效" }, 400);
+    }
+
+    const request = readClientBody(body);
+    if (!limiter.failuresAllowed(ip, request.fingerprint || null)) {
+      return c.json({ error: "TRIAL_LLM_RATE_LIMITED", message: "失败次数过多，请稍后再试" }, 429);
+    }
+
+    try {
+      return c.json(
+        await issueTrialLlmProfile(db, config, {
+          productId: request.productId || config.defaultProductId,
+          fingerprint: request.fingerprint,
+          appVersion: request.appVersion,
+          platform: request.platform,
+          country: cfCountry(c),
+        })
+      );
+    } catch (err) {
+      if (err instanceof ActivationError) {
+        if (err.statusCode !== 200) {
+          limiter.recordFailure(ip, request.fingerprint || null);
+        }
+        return c.json(activationErrorBody(err), statusFor(err));
+      }
+      limiter.recordFailure(ip, request.fingerprint || null);
+      console.error("Trial LLM profile error:", err);
       return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
     }
   });

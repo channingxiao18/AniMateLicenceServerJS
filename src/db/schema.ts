@@ -435,6 +435,84 @@ export const catalogModels = sqliteTable(
   })
 );
 
+// Trial LLM key pool (docs/plans/trial-llm-key-plan.md §3.3). Three tables:
+// pools hold the LLM info (base_url/model/valid_until) so switching model or
+// gateway is one row insert; keys are the pool members (api key AES-encrypted);
+// grants are the per-machine idempotency + reference ledger.
+//
+// `status='disabled'` on a pool only stops NEW issuance — machines already
+// holding one of its keys keep working. Cutting them off is `revoked` on the key.
+export const llmTrialPools = sqliteTable(
+  "llm_trial_pools",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    note: text("note"),
+    productId: text("product_id")
+      .notNull()
+      .references(() => products.productId),
+    baseUrl: text("base_url").notNull(),
+    model: text("model").notNull(),
+    // Absolute expiry of the keys in this pool (the upstream key's own expiry).
+    // Issued grants snapshot it, so editing a pool never moves an issued profile.
+    validUntil: text("valid_until").notNull(),
+    /** Optional candidate filter — null means "any platform". */
+    platform: text("platform"),
+    /** JSON array of excluded ISO country codes, e.g. '["CN"]'. */
+    excludedCountries: text("excluded_countries"),
+    status: text("status").notNull().default("active"),
+    createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+    updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => ({
+    statusIdx: index("llm_trial_pools_status_idx").on(table.status),
+  })
+);
+
+export const llmTrialKeys = sqliteTable(
+  "llm_trial_keys",
+  {
+    id: text("id").primaryKey(),
+    poolId: text("pool_id")
+      .notNull()
+      .references(() => llmTrialPools.id),
+    /** packAesBlob(iv, ciphertext) — plaintext never lands in the database. */
+    apiKeyEnc: text("api_key_enc").notNull(),
+    status: text("status").notNull().default("active"),
+    note: text("note"),
+    createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+    revokedAt: text("revoked_at"),
+    updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => ({
+    poolIdx: index("llm_trial_keys_pool_idx").on(table.poolId),
+    statusIdx: index("llm_trial_keys_status_idx").on(table.status),
+  })
+);
+
+export const llmTrialGrants = sqliteTable(
+  "llm_trial_grants",
+  {
+    grantId: text("grant_id").primaryKey(),
+    fingerprintHash: text("fingerprint_hash").notNull(),
+    keyId: text("key_id")
+      .notNull()
+      .references(() => llmTrialKeys.id),
+    // Same telemetry-compatible hash as activations/trial_grants.
+    telemetryMachineHash: text("telemetry_machine_hash"),
+    validUntil: text("valid_until").notNull(),
+    status: text("status").notNull().default("active"),
+    appVersion: text("app_version"),
+    platform: text("platform"),
+    createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+    updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => ({
+    fingerprintIdx: index("llm_trial_grants_fingerprint_idx").on(table.fingerprintHash),
+    keyIdx: index("llm_trial_grants_key_idx").on(table.keyId),
+  })
+);
+
 // One row per claim — the quota record ("N per machine") and the analysis
 // ledger. Rows count against quota unless status = 'refunded'; retries of the
 // same grant reuse its row, so a download retry never burns extra quota.

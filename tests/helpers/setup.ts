@@ -330,6 +330,50 @@ CREATE TABLE IF NOT EXISTS community_settings (
   value text NOT NULL,
   updated_at text DEFAULT (datetime('now')) NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS llm_trial_pools (
+  id text PRIMARY KEY NOT NULL,
+  name text NOT NULL,
+  note text,
+  product_id text NOT NULL,
+  base_url text NOT NULL,
+  model text NOT NULL,
+  valid_until text NOT NULL,
+  platform text,
+  excluded_countries text,
+  status text DEFAULT 'active' NOT NULL,
+  created_at text DEFAULT (datetime('now')) NOT NULL,
+  updated_at text DEFAULT (datetime('now')) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS llm_trial_pools_status_idx ON llm_trial_pools (status);
+
+CREATE TABLE IF NOT EXISTS llm_trial_keys (
+  id text PRIMARY KEY NOT NULL,
+  pool_id text NOT NULL,
+  api_key_enc text NOT NULL,
+  status text DEFAULT 'active' NOT NULL,
+  note text,
+  created_at text DEFAULT (datetime('now')) NOT NULL,
+  revoked_at text,
+  updated_at text DEFAULT (datetime('now')) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS llm_trial_keys_pool_idx ON llm_trial_keys (pool_id);
+CREATE INDEX IF NOT EXISTS llm_trial_keys_status_idx ON llm_trial_keys (status);
+
+CREATE TABLE IF NOT EXISTS llm_trial_grants (
+  grant_id text PRIMARY KEY NOT NULL,
+  fingerprint_hash text NOT NULL,
+  key_id text NOT NULL,
+  telemetry_machine_hash text,
+  valid_until text NOT NULL,
+  status text DEFAULT 'active' NOT NULL,
+  app_version text,
+  platform text,
+  created_at text DEFAULT (datetime('now')) NOT NULL,
+  updated_at text DEFAULT (datetime('now')) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS llm_trial_grants_fingerprint_idx ON llm_trial_grants (fingerprint_hash);
+CREATE INDEX IF NOT EXISTS llm_trial_grants_key_idx ON llm_trial_grants (key_id);
 `;
 
 export function createTestDb(): { sqlite: Database.Database; db: AppDb } {
@@ -389,6 +433,10 @@ export function createTestConfig(rsaPrivateKeyPkcs8Hex: string): AppConfig {
     trialFullFeatureDurationSeconds: 86400,
     trialTimeCheckToken: "animate-trial-time-check-v1",
     trialFingerprintSalt: "test_trial_salt",
+    trialLlmEnabled: false,
+    trialLlmMaxProfilesPerMachine: 1,
+    trialLlmSoftMaxRequests: 60,
+    trialLlmReuseReferencedKeys: true,
     catalogEnabled: false,
     catalogExcludedCountries: ["CN"],
     catalogMaxGrantsPerMachine: 3,

@@ -29,6 +29,19 @@ export interface AppConfig {
   trialFullFeatureDurationSeconds: number;
   trialTimeCheckToken: string;
   trialFingerprintSalt: string;
+  // Trial LLM key pool (docs/plans/trial-llm-key-plan.md §3). Disabled by
+  // default — flip TRIAL_LLM_ENABLED only after a pool and its keys are seeded.
+  trialLlmEnabled: boolean;
+  /** How many keys one machine may ever be issued (1 = strictly one, no re-issue). */
+  trialLlmMaxProfilesPerMachine: number;
+  /** Per-machine soft turn cap handed to the client as `quota.max_requests`. */
+  trialLlmSoftMaxRequests: number;
+  /**
+   * Whether allocation may hand out a key that other machines already reference
+   * once every candidate has at least one. `true` = keep serving (fewest
+   * references first); `false` = fail with LLM_POOL_EMPTY and make ops top up.
+   */
+  trialLlmReuseReferencedKeys: boolean;
   // Random sample-model catalog (Lever 1). Disabled by default — flip
   // CATALOG_ENABLED only after models are uploaded and verified.
   catalogEnabled: boolean;
@@ -104,6 +117,17 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
       env.TRIAL_FINGERPRINT_SALT ||
       env.SESSION_SECRET ||
       "change_me_trial_fingerprint_salt",
+    trialLlmEnabled: (env.TRIAL_LLM_ENABLED || "false").toLowerCase() === "true",
+    trialLlmMaxProfilesPerMachine: parseInt(
+      env.TRIAL_LLM_MAX_PROFILES_PER_MACHINE || "1",
+      10
+    ),
+    trialLlmSoftMaxRequests: parseInt(
+      env.TRIAL_LLM_SOFT_MAX_REQUESTS || "60",
+      10
+    ),
+    trialLlmReuseReferencedKeys:
+      (env.TRIAL_LLM_REUSE_REFERENCED_KEYS || "true").toLowerCase() !== "false",
     catalogEnabled: (env.CATALOG_ENABLED || "false").toLowerCase() === "true",
     // "" (explicitly set empty) means "no country exclusions" — only an unset
     // var falls back to the default policy. `||` would make the empty form

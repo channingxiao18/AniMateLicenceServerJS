@@ -29,6 +29,14 @@ import {
 } from "../services/activation";
 import { parsePlanFeatures } from "../services/plan_features";
 import { readCatalogCardEnabled, writeCatalogCardEnabled } from "../services/catalog";
+import {
+  createLlmTrialKey,
+  createLlmTrialPool,
+  listLlmTrialKeys,
+  listLlmTrialPools,
+  revokeLlmTrialKey,
+  setLlmTrialPoolStatus,
+} from "../services/llm_trial";
 import { readCommunityInfo, writeCommunityInfo } from "../services/community";
 import { deleteTrialGrant } from "../services/trial";
 
@@ -416,6 +424,83 @@ export function createAdminApiRouter(db: Database, _config: AppConfig, registry:
       const enabled = raw === true || raw === "true" || raw === "1";
       await writeCatalogCardEnabled(db, enabled);
       return okOrRedirect(c, { status: "ok", enabled });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  // ─── Trial LLM key pool (docs/plans/trial-llm-key-plan.md §3.3 / §3.5) ────
+  //
+  // Ops surface for the pool: what is still unused (the "top up the pool"
+  // signal), and the manual kill switch. Revoking a key cuts off EVERY machine
+  // referencing it, so the list carries `referencedMachines` — read it before
+  // clicking.
+  router.get("/llm-trial/pools", async (c) => {
+    return c.json({ items: await listLlmTrialPools(db) });
+  });
+
+  router.post("/llm-trial/pools", async (c) => {
+    try {
+      const body = await readBody(c);
+      const pool = await createLlmTrialPool(db, {
+        name: String(body.name ?? ""),
+        note: body.note == null ? null : String(body.note),
+        productId: String(body.product_id ?? body.productId ?? "animate"),
+        baseUrl: String(body.base_url ?? body.baseUrl ?? ""),
+        model: String(body.model ?? ""),
+        validUntil:
+          typeof body.valid_until === "number"
+            ? body.valid_until
+            : String(body.valid_until ?? body.validUntil ?? ""),
+        platform: body.platform == null ? null : String(body.platform),
+        excludedCountries: Array.isArray(body.excluded_countries)
+          ? (body.excluded_countries as string[])
+          : null,
+      });
+      return okOrRedirect(c, { status: "ok", id: pool.id });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  router.post("/llm-trial/pools/:id/status", async (c) => {
+    try {
+      const body = await readBody(c);
+      const status = String(body.status ?? "");
+      if (status !== "active" && status !== "disabled") {
+        return c.json({ error: "INVALID_REQUEST", message: "status 取值无效" }, 400);
+      }
+      await setLlmTrialPoolStatus(db, c.req.param("id"), status);
+      return okOrRedirect(c, { status: "ok", pool_status: status });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  router.get("/llm-trial/keys", async (c) => {
+    const poolId = c.req.query("pool_id") || c.req.query("poolId") || undefined;
+    return c.json({ items: await listLlmTrialKeys(db, { poolId }) });
+  });
+
+  router.post("/llm-trial/keys", async (c) => {
+    try {
+      const body = await readBody(c);
+      const key = await createLlmTrialKey(db, {
+        poolId: String(body.pool_id ?? body.poolId ?? ""),
+        apiKey: String(body.api_key ?? body.apiKey ?? ""),
+        note: body.note == null ? null : String(body.note),
+      });
+      // Never echo the key material back.
+      return okOrRedirect(c, { status: "ok", id: key.id, pool_id: key.poolId });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  router.post("/llm-trial/keys/:id/revoke", async (c) => {
+    try {
+      const result = await revokeLlmTrialKey(db, c.req.param("id"));
+      return okOrRedirect(c, { status: "ok", revoked_grants: result.revokedGrants });
     } catch (err) {
       return errorResponse(c, err);
     }
