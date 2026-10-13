@@ -123,6 +123,16 @@ export const EVENT_NAMES = new Set([
   // block's exposure is deduped per process. Added 2026-10-10.
   "community_entry_clicked",
   "community_link_clicked",
+  // --- Trial LLM key (AniMate docs/plans/trial-llm-key-plan.md §5) ---
+  // Issued → used per turn → stopped → replaced by the user's own service. Under
+  // the pool model the third-party gateway owns the real quota, so these are the
+  // only place "did the trial actually get used" can be answered at all.
+  // Privacy: the client never receives the key, and no payload field carries it,
+  // a prefix or a hash — quota is always one of three buckets.
+  "trial_llm_profile_issued",
+  "trial_llm_turn_used",
+  "trial_llm_exhausted",
+  "trial_llm_profile_discarded",
 ]);
 
 const LICENSE_STATES = new Set([
@@ -278,6 +288,15 @@ export const PRODUCT_EVENT_NAMES = [
   "community_entry_shown",
   "community_entry_clicked",
   "community_link_clicked",
+  // --- Trial LLM key (AniMate docs/plans/trial-llm-key-plan.md §5) ---
+  // Listed here as well as in EVENT_NAMES, for the same three readers documented
+  // above (machine_active mark, per-(day, install) device view, raw event load).
+  // Being only in EVENT_NAMES would ingest the trial funnel and still report zero
+  // for it — and the whole point of the batch is that ratio.
+  "trial_llm_profile_issued",
+  "trial_llm_turn_used",
+  "trial_llm_exhausted",
+  "trial_llm_profile_discarded",
 ] as const;
 
 type ProductEvent = {
