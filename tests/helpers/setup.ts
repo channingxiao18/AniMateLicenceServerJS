@@ -351,6 +351,7 @@ CREATE TABLE IF NOT EXISTS llm_trial_keys (
   id text PRIMARY KEY NOT NULL,
   pool_id text NOT NULL,
   api_key_enc text NOT NULL,
+  key_hint text,
   status text DEFAULT 'active' NOT NULL,
   note text,
   created_at text DEFAULT (datetime('now')) NOT NULL,

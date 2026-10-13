@@ -34,6 +34,7 @@ import {
   machineIdentityFromFingerprint,
   nowISO,
   telemetryMachineHashFromFingerprint,
+  writeAuditLog,
 } from "./activation";
 
 type LlmTrialPool = typeof llmTrialPools.$inferSelect;
@@ -63,6 +64,8 @@ export type LlmTrialKeySummary = {
   note: string | null;
   createdAt: string;
   revokedAt: string | null;
+  /** Last 4 characters, so an operator can tell keys apart. Never the full key. */
+  keyHint: string | null;
   /** Machines currently holding this key (active grants). */
   referencedMachines: number;
 };
@@ -75,6 +78,8 @@ export type LlmTrialPoolSummary = {
   baseUrl: string;
   model: string;
   validUntil: string;
+  /** Candidate filter — `null` means "any platform". Shown in the edit modal. */
+  platform: string | null;
   status: string;
   expired: boolean;
   keyCount: number;
@@ -107,11 +112,19 @@ function isPast(value: string, now = new Date()): boolean {
 /**
  * Normalise an operator-supplied expiry into the DB shape.
  *
- * Accepts epoch seconds (number or numeric string) or a `YYYY-MM-DD HH:MM[:SS]` /
- * `YYYY-MM-DDTHH:MM[:SS]` stamp. Stamp strings are treated as UTC — the dashboard
- * labels the field accordingly, and epoch seconds avoid the question entirely.
+ * Accepts a `Date`, epoch seconds (number or numeric string), or a
+ * `YYYY-MM-DD HH:MM[:SS]` / ISO-8601 `YYYY-MM-DDTHH:MM[:SS][.sss][Z]` stamp.
+ * Stamp strings are treated as UTC — the dashboard labels the field accordingly,
+ * and epoch seconds avoid the question entirely.
+ *
+ * The ISO branch matters: `new Date(...).toISOString()` (the obvious way to build
+ * a timestamp in a script) carries milliseconds and a `Z`, and storing that
+ * verbatim produces a value `parseDbDate` cannot read.
  */
-export function normalizeValidUntil(value: number | string): string {
+export function normalizeValidUntil(value: number | string | Date): string {
+  if (value instanceof Date) {
+    return dateToISOSeconds(value);
+  }
   if (typeof value === "number") {
     return dateToISOSeconds(new Date(value * 1000));
   }
@@ -119,8 +132,14 @@ export function normalizeValidUntil(value: number | string): string {
   if (/^\d{9,}$/.test(trimmed)) {
     return dateToISOSeconds(new Date(Number(trimmed) * 1000));
   }
-  const normalized = trimmed.replace("T", " ");
-  return normalized.length === 16 ? `${normalized}:00` : normalized;
+  const stamp = trimmed.match(
+    /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::(\d{2}))?(?:\.\d+)?Z?$/
+  );
+  if (stamp) {
+    const [, day, hourMinute, seconds] = stamp;
+    return `${day} ${hourMinute}:${seconds ?? "00"}`;
+  }
+  return trimmed;
 }
 
 /** Region gate, same shape as catalog's `isCountryEligible`. */
@@ -194,6 +213,25 @@ function randomIv(): string {
   crypto.getRandomValues(bytes);
   return bytesToHex(bytes);
 }
+
+/**
+ * The operator-facing fragment of a key: its last 4 characters.
+ *
+ * Stored at creation time so listing keys never has to decrypt one. Four
+ * characters are not enough to reconstruct or use a key, and the dashboard is
+ * behind admin auth.
+ */
+function keyHintFrom(apiKey: string): string | null {
+  const trimmed = apiKey.trim();
+  if (trimmed.length < 4) return null;
+  return trimmed.slice(-4);
+}
+
+/** Who did it — recorded in `audit_logs` for every pool/key mutation. */
+export type LlmTrialAudit = {
+  actor?: string;
+  ipAddress?: string | null;
+};
 
 async function encryptApiKey(apiKey: string): Promise<string> {
   const iv = randomIv();
@@ -451,10 +489,11 @@ export async function createLlmTrialPool(
     productId: string;
     baseUrl: string;
     model: string;
-    validUntil: number | string;
+    validUntil: number | string | Date;
     platform?: string | null;
     excludedCountries?: string[] | null;
-  }
+  },
+  audit: LlmTrialAudit = {}
 ): Promise<LlmTrialPool> {
   const name = params.name.trim();
   const baseUrl = params.baseUrl.trim();
@@ -484,13 +523,93 @@ export async function createLlmTrialPool(
   });
   const pool = await db.select().from(llmTrialPools).where(eq(llmTrialPools.id, id)).get();
   if (!pool) throw new ActivationError("SERVER_ERROR", "读取池记录失败", 500);
+  await writeAuditLog(db, {
+    action: "llm_trial_pool_create",
+    targetType: "llm_trial_pool",
+    targetId: id,
+    actor: audit.actor,
+    ipAddress: audit.ipAddress,
+    after: pool,
+  });
   return pool;
+}
+
+/**
+ * Patch a pool. Only the fields listed here are editable — `id`, `status` and the
+ * derived counters are not.
+ *
+ * Extending `valid_until` is the operationally important one: expiry is read live
+ * from the pool, so extending it revives machines that were already answered
+ * `LLM_KEY_EXPIRED` instead of stranding them.
+ */
+export async function updateLlmTrialPool(
+  db: Database,
+  poolId: string,
+  patch: {
+    name?: string;
+    note?: string | null;
+    baseUrl?: string;
+    model?: string;
+    validUntil?: number | string | Date;
+    platform?: string | null;
+    excludedCountries?: string[] | null;
+  },
+  audit: LlmTrialAudit = {}
+): Promise<LlmTrialPool> {
+  const before = await db.select().from(llmTrialPools).where(eq(llmTrialPools.id, poolId)).get();
+  if (!before) throw new ActivationError("POOL_NOT_FOUND", "池不存在", 404);
+
+  const next: Partial<typeof llmTrialPools.$inferInsert> = { updatedAt: nowISO() };
+  if (patch.name !== undefined) {
+    const name = patch.name.trim();
+    if (!name) throw new ActivationError("INVALID_REQUEST", "name 不能为空", 400);
+    next.name = name;
+  }
+  if (patch.note !== undefined) next.note = patch.note;
+  if (patch.baseUrl !== undefined) {
+    const baseUrl = patch.baseUrl.trim();
+    if (!baseUrl) throw new ActivationError("INVALID_REQUEST", "baseUrl 不能为空", 400);
+    next.baseUrl = baseUrl;
+  }
+  if (patch.model !== undefined) {
+    const model = patch.model.trim();
+    if (!model) throw new ActivationError("INVALID_REQUEST", "model 不能为空", 400);
+    next.model = model;
+  }
+  if (patch.validUntil !== undefined) {
+    const validUntil = normalizeValidUntil(patch.validUntil);
+    if (!validUntil || Number.isNaN(parseDbDate(validUntil).getTime())) {
+      throw new ActivationError("INVALID_REQUEST", "valid_until 无法解析", 400);
+    }
+    next.validUntil = validUntil;
+  }
+  if (patch.platform !== undefined) next.platform = patch.platform;
+  if (patch.excludedCountries !== undefined) {
+    next.excludedCountries = patch.excludedCountries
+      ? JSON.stringify(patch.excludedCountries.map((c) => c.toUpperCase()))
+      : null;
+  }
+
+  await db.update(llmTrialPools).set(next).where(eq(llmTrialPools.id, poolId));
+  const after = await db.select().from(llmTrialPools).where(eq(llmTrialPools.id, poolId)).get();
+  if (!after) throw new ActivationError("SERVER_ERROR", "读取池记录失败", 500);
+  await writeAuditLog(db, {
+    action: "llm_trial_pool_update",
+    targetType: "llm_trial_pool",
+    targetId: poolId,
+    actor: audit.actor,
+    ipAddress: audit.ipAddress,
+    before,
+    after,
+  });
+  return after;
 }
 
 export async function setLlmTrialPoolStatus(
   db: Database,
   poolId: string,
-  status: "active" | "disabled"
+  status: "active" | "disabled",
+  audit: LlmTrialAudit = {}
 ): Promise<void> {
   const pool = await db.select().from(llmTrialPools).where(eq(llmTrialPools.id, poolId)).get();
   if (!pool) throw new ActivationError("POOL_NOT_FOUND", "池不存在", 404);
@@ -498,11 +617,21 @@ export async function setLlmTrialPoolStatus(
     .update(llmTrialPools)
     .set({ status, updatedAt: nowISO() })
     .where(eq(llmTrialPools.id, poolId));
+  await writeAuditLog(db, {
+    action: status === "disabled" ? "llm_trial_pool_disable" : "llm_trial_pool_enable",
+    targetType: "llm_trial_pool",
+    targetId: poolId,
+    actor: audit.actor,
+    ipAddress: audit.ipAddress,
+    before: { status: pool.status },
+    after: { status },
+  });
 }
 
 export async function createLlmTrialKey(
   db: Database,
-  params: { poolId: string; apiKey: string; note?: string | null }
+  params: { poolId: string; apiKey: string; note?: string | null },
+  audit: LlmTrialAudit = {}
 ): Promise<LlmTrialKey> {
   const pool = await db
     .select()
@@ -520,12 +649,72 @@ export async function createLlmTrialKey(
     id,
     poolId: params.poolId,
     apiKeyEnc: await encryptApiKey(apiKey),
+    keyHint: keyHintFrom(apiKey),
     status: "active",
     note: params.note ?? null,
   });
   const key = await db.select().from(llmTrialKeys).where(eq(llmTrialKeys.id, id)).get();
   if (!key) throw new ActivationError("SERVER_ERROR", "读取 key 记录失败", 500);
+  await writeAuditLog(db, {
+    action: "llm_trial_key_create",
+    targetType: "llm_trial_key",
+    targetId: id,
+    actor: audit.actor,
+    ipAddress: audit.ipAddress,
+    // Never the key itself — not even the encrypted form.
+    after: { id, poolId: key.poolId, keyHint: key.keyHint, status: key.status },
+  });
   return key;
+}
+
+/**
+ * Paste-a-batch helper: one key per line.
+ *
+ * Deduplicates within the batch and drops blanks, so a re-pasted list cannot add
+ * the same row twice in one submission. Cross-batch duplicates are *not* detected
+ * (that would mean decrypting every stored key to compare); the returned counts
+ * make what happened visible to the operator.
+ */
+export async function createLlmTrialKeys(
+  db: Database,
+  params: { poolId: string; apiKeys: string[]; note?: string | null },
+  audit: LlmTrialAudit = {}
+): Promise<{ created: number; skipped: number; ids: string[] }> {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  let skipped = 0;
+  for (const raw of params.apiKeys) {
+    const key = raw.trim();
+    if (!key) continue;
+    if (seen.has(key)) {
+      skipped += 1;
+      continue;
+    }
+    seen.add(key);
+    unique.push(key);
+  }
+  if (unique.length === 0) {
+    throw new ActivationError("INVALID_REQUEST", "没有可添加的 key", 400);
+  }
+
+  const ids: string[] = [];
+  for (const apiKey of unique) {
+    const created = await createLlmTrialKey(
+      db,
+      { poolId: params.poolId, apiKey, note: params.note ?? null },
+      audit
+    );
+    ids.push(created.id);
+  }
+  await writeAuditLog(db, {
+    action: "llm_trial_key_bulk_create",
+    targetType: "llm_trial_pool",
+    targetId: params.poolId,
+    actor: audit.actor,
+    ipAddress: audit.ipAddress,
+    after: { created: ids.length, skipped },
+  });
+  return { created: ids.length, skipped, ids };
 }
 
 /**
@@ -537,7 +726,8 @@ export async function createLlmTrialKey(
  */
 export async function revokeLlmTrialKey(
   db: Database,
-  keyId: string
+  keyId: string,
+  audit: LlmTrialAudit = {}
 ): Promise<{ revokedGrants: number }> {
   const key = await db.select().from(llmTrialKeys).where(eq(llmTrialKeys.id, keyId)).get();
   if (!key) throw new ActivationError("KEY_NOT_FOUND", "key 不存在", 404);
@@ -558,6 +748,15 @@ export async function revokeLlmTrialKey(
       .set({ status: "revoked", updatedAt: nowISO() })
       .where(and(eq(llmTrialGrants.keyId, keyId), eq(llmTrialGrants.status, "active")));
   }
+  await writeAuditLog(db, {
+    action: "llm_trial_key_revoke",
+    targetType: "llm_trial_key",
+    targetId: keyId,
+    actor: audit.actor,
+    ipAddress: audit.ipAddress,
+    before: { status: key.status, poolId: key.poolId, keyHint: key.keyHint },
+    after: { status: "revoked", revokedGrants: affected.length },
+  });
   return { revokedGrants: affected.length };
 }
 
@@ -587,6 +786,7 @@ export async function listLlmTrialPools(db: Database): Promise<LlmTrialPoolSumma
       baseUrl: pool.baseUrl,
       model: pool.model,
       validUntil: pool.validUntil,
+      platform: pool.platform ?? null,
       status: pool.status,
       expired: isPast(pool.validUntil, now),
       keyCount: poolKeys.length,
@@ -622,6 +822,7 @@ export async function listLlmTrialKeys(
     note: key.note,
     createdAt: key.createdAt,
     revokedAt: key.revokedAt,
+    keyHint: key.keyHint ?? null,
     referencedMachines: refs.get(key.id) ?? 0,
   }));
 }

@@ -31,11 +31,13 @@ import { parsePlanFeatures } from "../services/plan_features";
 import { readCatalogCardEnabled, writeCatalogCardEnabled } from "../services/catalog";
 import {
   createLlmTrialKey,
+  createLlmTrialKeys,
   createLlmTrialPool,
   listLlmTrialKeys,
   listLlmTrialPools,
   revokeLlmTrialKey,
   setLlmTrialPoolStatus,
+  updateLlmTrialPool,
 } from "../services/llm_trial";
 import { readCommunityInfo, writeCommunityInfo } from "../services/community";
 import { deleteTrialGrant } from "../services/trial";
@@ -442,22 +444,61 @@ export function createAdminApiRouter(db: Database, _config: AppConfig, registry:
   router.post("/llm-trial/pools", async (c) => {
     try {
       const body = await readBody(c);
-      const pool = await createLlmTrialPool(db, {
-        name: String(body.name ?? ""),
-        note: body.note == null ? null : String(body.note),
-        productId: String(body.product_id ?? body.productId ?? "animate"),
-        baseUrl: String(body.base_url ?? body.baseUrl ?? ""),
-        model: String(body.model ?? ""),
-        validUntil:
+      const pool = await createLlmTrialPool(
+        db,
+        {
+          name: String(body.name ?? ""),
+          note: body.note == null ? null : String(body.note),
+          productId: String(body.product_id ?? body.productId ?? "animate"),
+          baseUrl: String(body.base_url ?? body.baseUrl ?? ""),
+          model: String(body.model ?? ""),
+          validUntil:
+            typeof body.valid_until === "number"
+              ? body.valid_until
+              : String(body.valid_until ?? body.validUntil ?? ""),
+          platform: body.platform == null ? null : String(body.platform),
+          excludedCountries: Array.isArray(body.excluded_countries)
+            ? (body.excluded_countries as string[])
+            : null,
+        },
+        { actor: "admin", ipAddress: ip(c) }
+      );
+      return okOrRedirect(c, { status: "ok", id: pool.id });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  // Extending `valid_until` here is the "revive machines we answered
+  // LLM_KEY_EXPIRED" operation — expiry is read live from the pool, so no
+  // per-machine action is needed.
+  router.post("/llm-trial/pools/:id/update", async (c) => {
+    try {
+      const body = await readBody(c);
+      const patch: Parameters<typeof updateLlmTrialPool>[2] = {};
+      if (body.name !== undefined) patch.name = String(body.name);
+      if (body.note !== undefined) patch.note = body.note == null ? null : String(body.note);
+      if (body.base_url !== undefined || body.baseUrl !== undefined) {
+        patch.baseUrl = String(body.base_url ?? body.baseUrl ?? "");
+      }
+      if (body.model !== undefined) patch.model = String(body.model);
+      if (body.valid_until !== undefined || body.validUntil !== undefined) {
+        patch.validUntil =
           typeof body.valid_until === "number"
             ? body.valid_until
-            : String(body.valid_until ?? body.validUntil ?? ""),
-        platform: body.platform == null ? null : String(body.platform),
-        excludedCountries: Array.isArray(body.excluded_countries)
-          ? (body.excluded_countries as string[])
-          : null,
+            : String(body.valid_until ?? body.validUntil ?? "");
+      }
+      if (body.platform !== undefined) {
+        patch.platform = body.platform == null ? null : String(body.platform);
+      }
+      if (Array.isArray(body.excluded_countries)) {
+        patch.excludedCountries = body.excluded_countries as string[];
+      }
+      const pool = await updateLlmTrialPool(db, c.req.param("id"), patch, {
+        actor: "admin",
+        ipAddress: ip(c),
       });
-      return okOrRedirect(c, { status: "ok", id: pool.id });
+      return okOrRedirect(c, { status: "ok", id: pool.id, valid_until: pool.validUntil });
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -470,7 +511,10 @@ export function createAdminApiRouter(db: Database, _config: AppConfig, registry:
       if (status !== "active" && status !== "disabled") {
         return c.json({ error: "INVALID_REQUEST", message: "status 取值无效" }, 400);
       }
-      await setLlmTrialPoolStatus(db, c.req.param("id"), status);
+      await setLlmTrialPoolStatus(db, c.req.param("id"), status, {
+        actor: "admin",
+        ipAddress: ip(c),
+      });
       return okOrRedirect(c, { status: "ok", pool_status: status });
     } catch (err) {
       return errorResponse(c, err);
@@ -485,11 +529,15 @@ export function createAdminApiRouter(db: Database, _config: AppConfig, registry:
   router.post("/llm-trial/keys", async (c) => {
     try {
       const body = await readBody(c);
-      const key = await createLlmTrialKey(db, {
-        poolId: String(body.pool_id ?? body.poolId ?? ""),
-        apiKey: String(body.api_key ?? body.apiKey ?? ""),
-        note: body.note == null ? null : String(body.note),
-      });
+      const key = await createLlmTrialKey(
+        db,
+        {
+          poolId: String(body.pool_id ?? body.poolId ?? ""),
+          apiKey: String(body.api_key ?? body.apiKey ?? ""),
+          note: body.note == null ? null : String(body.note),
+        },
+        { actor: "admin", ipAddress: ip(c) }
+      );
       // Never echo the key material back.
       return okOrRedirect(c, { status: "ok", id: key.id, pool_id: key.poolId });
     } catch (err) {
@@ -497,9 +545,36 @@ export function createAdminApiRouter(db: Database, _config: AppConfig, registry:
     }
   });
 
+  // Paste-a-batch: one key per line.
+  router.post("/llm-trial/keys/bulk", async (c) => {
+    try {
+      const body = await readBody(c);
+      const raw = String(body.api_keys ?? body.apiKeys ?? "");
+      const result = await createLlmTrialKeys(
+        db,
+        {
+          poolId: String(body.pool_id ?? body.poolId ?? ""),
+          apiKeys: raw.split(/\r?\n/),
+          note: body.note == null ? null : String(body.note),
+        },
+        { actor: "admin", ipAddress: ip(c) }
+      );
+      return okOrRedirect(c, {
+        status: "ok",
+        created: result.created,
+        skipped: result.skipped,
+      });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
   router.post("/llm-trial/keys/:id/revoke", async (c) => {
     try {
-      const result = await revokeLlmTrialKey(db, c.req.param("id"));
+      const result = await revokeLlmTrialKey(db, c.req.param("id"), {
+        actor: "admin",
+        ipAddress: ip(c),
+      });
       return okOrRedirect(c, { status: "ok", revoked_grants: result.revokedGrants });
     } catch (err) {
       return errorResponse(c, err);

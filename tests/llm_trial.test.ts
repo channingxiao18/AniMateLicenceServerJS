@@ -11,6 +11,7 @@ import { ActivationError } from "../src/services/activation";
 import { startTrial } from "../src/services/trial";
 import {
   createLlmTrialKey,
+  createLlmTrialKeys,
   createLlmTrialPool,
   issueTrialLlmProfile,
   listLlmTrialKeys,
@@ -20,8 +21,9 @@ import {
   poolAllowsCountry,
   revokeLlmTrialKey,
   setLlmTrialPoolStatus,
+  updateLlmTrialPool,
 } from "../src/services/llm_trial";
-import { llmTrialGrants, llmTrialKeys, llmTrialPools } from "../src/db/schema";
+import { auditLogs, llmTrialGrants, llmTrialKeys, llmTrialPools } from "../src/db/schema";
 
 // ─── helpers ──────────────────────────────────────────────────────────────
 
@@ -607,19 +609,190 @@ describe("llm trial admin routes", () => {  it("seeds a pool and key, reports bl
     expect(pools[0].expired).toBe(false);
   });
 
-  it("normalises epoch seconds and minute-precision stamps", () => {
+  it("normalises epoch seconds, minute stamps and full ISO strings", () => {
     expect(normalizeValidUntil(1_800_000_000)).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
     expect(normalizeValidUntil("1800000000")).toBe(normalizeValidUntil(1_800_000_000));
     expect(normalizeValidUntil("2027-03-05 14:30")).toBe("2027-03-05 14:30:00");
     expect(normalizeValidUntil("2027-03-05T14:30:00")).toBe("2027-03-05 14:30:00");
     expect(normalizeValidUntil("2027-03-05 14:30:00")).toBe("2027-03-05 14:30:00");
+    // The shape `new Date(...).toISOString()` produces — must not be stored verbatim.
+    expect(normalizeValidUntil("2027-03-05T14:30:00.000Z")).toBe("2027-03-05 14:30:00");
+    expect(normalizeValidUntil("2027-03-05T14:30Z")).toBe("2027-03-05 14:30:00");
+  });
+});
+
+describe("llm trial pool editing", () => {
+  it("extends a pool's expiry, which revives machines already answered LLM_KEY_EXPIRED", async () => {
+    const env = await setup();
+    const { pool } = await seedPool(env, { keyCount: 1 });
+    await trialMachine(env, "m-revive-edit");
+    const issued = await issue(env, "m-revive-edit");
+
+    // Expire the pool, observe the terminal answer…
+    await updateLlmTrialPool(env.db, pool.id, { validUntil: "2020-01-01 00:00:00" });
+    const err = await catchActivationError(() => issue(env, "m-revive-edit"));
+    expect(err.error).toBe("LLM_KEY_EXPIRED");
+
+    // …then extend it through the same edit path operators use. No per-machine
+    // action is needed because expiry is read live from the pool.
+    const extended = new Date((future() + 3600) * 1000);
+    const updated = await updateLlmTrialPool(env.db, pool.id, { validUntil: extended });
+    // A JS Date / ISO string (milliseconds + Z) must land in the DB shape, or the
+    // value becomes unparseable and every machine reads as expired forever.
+    expect(updated.validUntil).toBe(extended.toISOString().replace("T", " ").substring(0, 19));
+
+    const revived = await issue(env, "m-revive-edit");
+    expect(revived.grant_id).toBe(issued.grant_id);
+    expect(revived.llm.api_key).toBe(issued.llm.api_key);
+  });
+
+  it("edits model / base_url / platform / note and audits before and after", async () => {
+    const env = await setup();
+    const { pool } = await seedPool(env, { keyCount: 1, model: "old-model" });
+
+    const updated = await updateLlmTrialPool(
+      env.db,
+      pool.id,
+      {
+        model: "new-model",
+        baseUrl: "https://gw2.example/v1",
+        platform: "macos",
+        note: "fixed a typo",
+      },
+      { actor: "admin", ipAddress: "10.0.0.1" }
+    );
+    expect(updated.model).toBe("new-model");
+    expect(updated.baseUrl).toBe("https://gw2.example/v1");
+    expect(updated.platform).toBe("macos");
+    expect(updated.note).toBe("fixed a typo");
+
+    // A windows machine no longer matches the pool it used to be served by.
+    await trialMachine(env, "m-after-edit");
+    const err = await catchActivationError(() => issue(env, "m-after-edit"));
+    expect(err.error).toBe("LLM_POOL_EMPTY");
+
+    const rows = await env.db.select().from(auditLogs).all();
+    const edit = rows.find((row) => row.action === "llm_trial_pool_update");
+    expect(edit).toBeTruthy();
+    expect(edit!.actor).toBe("admin");
+    expect(edit!.ipAddress).toBe("10.0.0.1");
+    expect(JSON.parse(edit!.beforeJson!)).toMatchObject({ model: "old-model" });
+    expect(JSON.parse(edit!.afterJson!)).toMatchObject({ model: "new-model" });
+  });
+
+  it("rejects an empty or unparseable edit instead of writing it", async () => {
+    const env = await setup();
+    const { pool } = await seedPool(env, { keyCount: 1 });
+
+    const blankModel = await catchActivationError(() =>
+      updateLlmTrialPool(env.db, pool.id, { model: "   " })
+    );
+    expect(blankModel.error).toBe("INVALID_REQUEST");
+
+    const badDate = await catchActivationError(() =>
+      updateLlmTrialPool(env.db, pool.id, { validUntil: "not-a-date" })
+    );
+    expect(badDate.error).toBe("INVALID_REQUEST");
+
+    const missing = await catchActivationError(() =>
+      updateLlmTrialPool(env.db, "lp_does_not_exist", { model: "x" })
+    );
+    expect(missing.error).toBe("POOL_NOT_FOUND");
+  });
+});
+
+describe("llm trial bulk keys and hint", () => {
+  it("bulk-adds one key per line, ignoring blanks and same-batch duplicates", async () => {
+    const env = await setup();
+    const { pool } = await seedPool(env, { keyCount: 0 });
+
+    const result = await createLlmTrialKeys(
+      env.db,
+      {
+        poolId: pool.id,
+        apiKeys: ["sk-a", "sk-b", "", "   ", "sk-a", "sk-c"],
+        note: "batch 1",
+      },
+      { actor: "admin", ipAddress: "10.0.0.2" }
+    );
+
+    expect(result.created).toBe(3);
+    expect(result.skipped).toBe(1);
+
+    const summaries = await listLlmTrialKeys(env.db, { poolId: pool.id });
+    expect(summaries).toHaveLength(3);
+    expect(summaries.every((key) => key.note === "batch 1")).toBe(true);
+
+    // All three are real, usable candidates.
+    await trialMachine(env, "m-bulk-1");
+    const issued = await issue(env, "m-bulk-1");
+    expect(issued.llm.api_key).toMatch(/^sk-[abc]$/);
+  });
+
+  it("refuses a batch that contains nothing usable", async () => {
+    const env = await setup();
+    const { pool } = await seedPool(env, { keyCount: 0 });
+    const err = await catchActivationError(() =>
+      createLlmTrialKeys(env.db, { poolId: pool.id, apiKeys: ["", " ", "\r\n"] })
+    );
+    expect(err.error).toBe("INVALID_REQUEST");
+  });
+
+  it("stores only a 4-character hint and never the key itself", async () => {
+    const env = await setup();
+    const { pool } = await seedPool(env, { keyCount: 0 });
+    await createLlmTrialKeys(env.db, { poolId: pool.id, apiKeys: ["sk-secret-tail4321"] });
+
+    const stored = await env.db
+      .select()
+      .from(llmTrialKeys)
+      .where(eq(llmTrialKeys.poolId, pool.id))
+      .get();
+    expect(stored!.keyHint).toBe("4321");
+    // The hint is not enough to reconstruct the key, and the encrypted column
+    // carries no readable form of it.
+    expect(stored!.apiKeyEnc).not.toContain("sk-secret");
+
+    const summaries = await listLlmTrialKeys(env.db, { poolId: pool.id });
+    expect(summaries[0].keyHint).toBe("4321");
+  });
+
+  it("audits creation and revocation without ever recording key material", async () => {
+    const env = await setup();
+    const { pool } = await seedPool(env, { keyCount: 0 });
+    await createLlmTrialKeys(
+      env.db,
+      { poolId: pool.id, apiKeys: ["sk-audit-secret-9876"] },
+      { actor: "admin", ipAddress: "10.0.0.3" }
+    );
+    const key = (
+      await env.db.select().from(llmTrialKeys).where(eq(llmTrialKeys.poolId, pool.id)).all()
+    )[0];
+
+    await trialMachine(env, "m-audit");
+    await issue(env, "m-audit");
+    await revokeLlmTrialKey(env.db, key.id, { actor: "admin", ipAddress: "10.0.0.3" });
+
+    const rows = await env.db.select().from(auditLogs).all();
+    const actions = rows.map((row) => row.action);
+    expect(actions).toContain("llm_trial_key_create");
+    expect(actions).toContain("llm_trial_pool_create");
+    expect(actions).toContain("llm_trial_key_revoke");
+
+    const revoke = rows.find((row) => row.action === "llm_trial_key_revoke")!;
+    expect(JSON.parse(revoke.afterJson!)).toMatchObject({ revokedGrants: 1 });
+
+    // The whole audit trail must be key-material free.
+    const serialized = JSON.stringify(rows);
+    expect(serialized).not.toContain("sk-audit-secret-9876");
+    expect(serialized).not.toContain("sk-");
   });
 });
 
 describe("llm trial admin page", () => {
   it("renders pool capacity, the unused-key signal and per-key blast radius", async () => {
     const env = await setup();
-    const { keys } = await seedPool(env, { keyCount: 3, name: "第一批" });
+    const { pool, keys } = await seedPool(env, { keyCount: 3, name: "第一批" });
     await trialMachine(env, "m-page");
     await issue(env, "m-page");
 
@@ -639,6 +812,18 @@ describe("llm trial admin page", () => {
     expect(html).toContain("未使用");
     expect(html).toContain("被引用");
     expect(html).toContain(keys[0].id);
+    // Operator actions: bulk paste, per-pool editing, and telling keys apart.
+    expect(html).toContain("批量添加 key");
+    expect(html).toContain(`#edit-pool-${pool.id}`);
+    expect(html).toContain(`/admin/api/llm-trial/pools/${pool.id}/update`);
+    // The hint column shows a 4-character tail, never the key itself.
+    expect(html).toContain("尾号");
+    expect(html).toContain("…");
+    for (const key of keys) {
+      const hintCell = key.keyHint ? `…${key.keyHint}` : "";
+      expect(html).not.toContain(`sk-${pool.id.slice(-4)}-0`);
+      void hintCell;
+    }
 
     // Revoking from the page must be reachable and must warn about the blast radius.
     await revokeLlmTrialKey(env.db, keys[0].id);

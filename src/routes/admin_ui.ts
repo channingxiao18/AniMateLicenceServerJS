@@ -457,8 +457,23 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
       .map((p) => {
         const expiring = p.expired ? `<span class="badge bad">已过期</span>` : "";
         const low = !p.expired && p.status === "active" && p.unusedKeyCount === 0;
-        return `<tr><td><code>${e(p.id)}</code><div class="muted">${e(p.name)}</div></td><td>${badge(p.status)}${expiring}</td><td>${e(p.productId)}</td><td><code>${e(p.baseUrl)}</code><div class="muted">${e(p.model)}</div></td><td class="num-cell">${e(p.validUntil)}</td><td class="num-cell">${e(p.activeKeyCount)} / ${e(p.keyCount)}</td><td class="num-cell">${low ? `<span class="badge warn" title="池内每把 key 都已被至少一台机器引用">${e(p.unusedKeyCount)}</span>` : e(p.unusedKeyCount)}</td><td class="num-cell">${e(p.referencedMachines)}</td><td class="actions">${p.status === "active" ? `<form method="post" action="/admin/api/llm-trial/pools/${encodeURIComponent(p.id)}/status"><input type="hidden" name="status" value="disabled"><button class="danger" title="只影响新签发，已签发的机器不受影响">停用</button></form>` : `<form method="post" action="/admin/api/llm-trial/pools/${encodeURIComponent(p.id)}/status"><input type="hidden" name="status" value="active"><button>启用</button></form>`}</td></tr>`;
+        return `<tr><td><code>${e(p.id)}</code><div class="muted">${e(p.name)}</div></td><td>${badge(p.status)}${expiring}</td><td>${e(p.productId)}</td><td><code>${e(p.baseUrl)}</code><div class="muted">${e(p.model)}</div></td><td class="num-cell">${e(p.validUntil)}</td><td class="num-cell">${e(p.activeKeyCount)} / ${e(p.keyCount)}</td><td class="num-cell">${low ? `<span class="badge warn" title="池内每把 key 都已被至少一台机器引用">${e(p.unusedKeyCount)}</span>` : e(p.unusedKeyCount)}</td><td class="num-cell">${e(p.referencedMachines)}</td><td class="actions"><a class="btn" href="#edit-pool-${e(p.id)}" title="改 base_url / model / 有效期 / 平台 / 备注">编辑</a>${p.status === "active" ? `<form method="post" action="/admin/api/llm-trial/pools/${encodeURIComponent(p.id)}/status"><input type="hidden" name="status" value="disabled"><button class="danger" title="只影响新签发，已签发的机器不受影响">停用</button></form>` : `<form method="post" action="/admin/api/llm-trial/pools/${encodeURIComponent(p.id)}/status"><input type="hidden" name="status" value="active"><button>启用</button></form>`}</td></tr>`;
       })
+      .join("");
+
+    // One edit modal per pool, prefilled with what is stored now. Extending
+    // `valid_until` here is the "revive machines we answered LLM_KEY_EXPIRED"
+    // operation: expiry is read live from the pool, so no per-machine action.
+    const editPoolModals = pools
+      .map((p) =>
+        modal(
+          `edit-pool-${p.id}`,
+          `编辑池 · ${p.name}`,
+          `/admin/api/llm-trial/pools/${encodeURIComponent(p.id)}/update`,
+          `<div><label>名称</label><input name="name" value="${e(p.name)}" required></div><div><label>Base URL</label><input name="base_url" value="${e(p.baseUrl)}" required></div><div><label>Model</label><input name="model" value="${e(p.model)}" required></div><div><label>有效期（UTC，YYYY-MM-DD HH:MM；延长即可救回被判过期的机器）</label><input name="valid_until" value="${e(p.validUntil)}" required></div><div><label>平台（留空 = 不限）</label><input name="platform" value="${e(p.platform ?? "")}"></div><div><label>备注</label><input name="note" value="${e(p.note ?? "")}"></div>`,
+          "保存"
+        )
+      )
       .join("");
 
     const keyRows = keys
@@ -468,7 +483,8 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
           k.referencedMachines > 0
             ? `<span class="badge warn" title="撤销会同时打断这些机器">${e(k.referencedMachines)} 台</span>`
             : `<span class="badge muted">0 台</span>`;
-        return `<tr><td><code>${e(k.id)}</code></td><td>${e(pool?.name || k.poolId)}</td><td>${badge(k.status)}</td><td>${blast}</td><td class="num-cell">${e(k.createdAt)}</td><td class="num-cell">${e(k.revokedAt || "-")}</td><td>${e(k.note || "-")}</td><td class="actions">${k.status === "active" ? `<form method="post" action="/admin/api/llm-trial/keys/${encodeURIComponent(k.id)}/revoke" onsubmit="return confirm('撤销这把 key 会同时打断引用它的所有机器，确定继续？')"><button class="danger">撤销</button></form>` : `<span class="muted">已撤销</span>`}</td></tr>`;
+        const hint = k.keyHint ? `<code title="只显示尾 4 位，后台不保存也不回显完整 key">…${e(k.keyHint)}</code>` : `<span class="muted">—</span>`;
+        return `<tr><td><code>${e(k.id)}</code></td><td>${hint}</td><td>${e(pool?.name || k.poolId)}</td><td>${badge(k.status)}</td><td>${blast}</td><td class="num-cell">${e(k.createdAt)}</td><td class="num-cell">${e(k.revokedAt || "-")}</td><td>${e(k.note || "-")}</td><td class="actions">${k.status === "active" ? `<form method="post" action="/admin/api/llm-trial/keys/${encodeURIComponent(k.id)}/revoke" onsubmit="return confirm('撤销这把 key 会同时打断引用它的所有机器，确定继续？')"><button class="danger">撤销</button></form>` : `<span class="muted">已撤销</span>`}</td></tr>`;
       })
       .join("");
 
@@ -488,11 +504,19 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
       "添加"
     );
 
+    const bulkKeyModal = modal(
+      "create-llm-keys-bulk",
+      "批量添加 key",
+      "/admin/api/llm-trial/keys/bulk",
+      `<div><label>所属池</label><select name="pool_id">${poolOptions}</select></div><div><label>API Key（一行一把；空行忽略，同批重复自动跳过）</label><textarea name="api_keys" rows="8" autocomplete="off" placeholder="sk-aaa&#10;sk-bbb" required></textarea></div><div><label>备注（同批共用）</label><input name="note"></div>`,
+      "批量添加"
+    );
+
     return c.html(
       shell(
         "试用额度",
         "/admin/llm-trial",
-        `${flash(c)}<div class="toolbar"><div class="muted">试用期内的机器通过 <code>POST /v1/llm/trial-profile</code> 领取这里的一把 key。分配顺序：优先取<b>还没有机器引用</b>的 key，同级取创建时间最新的。「未使用」长期为 0 就是该补池了。<br>停用池只挡新签发；撤销 key 会打断所有引用它的机器（撤销后不会自动改签）。</div><div class="actions"><a class="btn primary" href="#create-llm-pool">新建池</a><a class="btn" href="#create-llm-key">添加 key</a></div></div><div class="table-card"><div class="table-caption"><div><h2>额度池</h2><p>base_url / model / 有效期都挂在池上，换模型或换网关只要加一条池记录，客户端无需发版。</p></div></div><div class="table-scroll"><table><thead><tr><th>池</th><th>状态</th><th>产品</th><th>LLM</th><th>有效期</th><th>可用 key</th><th title="还没有任何机器引用的 key 数量">未使用</th><th>已引用机器</th><th>操作</th></tr></thead><tbody>${poolRows || `<tr><td colspan="9" class="muted">暂无额度池</td></tr>`}</tbody></table></div></div><div class="table-card"><div class="table-caption"><div><h2>池内 key</h2><p>「被引用」是撤销前必须看的影响面：一把 key 服务多台机器。</p></div><span class="muted">共 ${keys.length} 把</span></div><div class="table-scroll"><table><thead><tr><th>Key ID</th><th>所属池</th><th>状态</th><th>被引用</th><th>创建时间</th><th>撤销时间</th><th>备注</th><th>操作</th></tr></thead><tbody>${keyRows || `<tr><td colspan="8" class="muted">池里还没有 key</td></tr>`}</tbody></table></div></div>${createPoolModal}${createKeyModal}`
+        `${flash(c)}<div class="toolbar"><div class="muted">试用期内的机器通过 <code>POST /v1/llm/trial-profile</code> 领取这里的一把 key。分配顺序：优先取<b>还没有机器引用</b>的 key，同级取创建时间最新的。「未使用」长期为 0 就是该补池了。<br>停用池只挡新签发；撤销 key 会打断所有引用它的机器（撤销后不会自动改签）。改池的<b>有效期即可救回</b>被判过期的机器。key 只显示尾 4 位，完整值只在创建时写入（加密）且不回显。</div><div class="actions"><a class="btn primary" href="#create-llm-pool">新建池</a><a class="btn" href="#create-llm-key">添加 key</a><a class="btn" href="#create-llm-keys-bulk">批量添加 key</a></div></div><div class="table-card"><div class="table-caption"><div><h2>额度池</h2><p>base_url / model / 有效期都挂在池上，换模型或换网关只要加一条池记录，客户端无需发版。</p></div></div><div class="table-scroll"><table><thead><tr><th>池</th><th>状态</th><th>产品</th><th>LLM</th><th>有效期</th><th>可用 key</th><th title="还没有任何机器引用的 key 数量">未使用</th><th>已引用机器</th><th>操作</th></tr></thead><tbody>${poolRows || `<tr><td colspan="9" class="muted">暂无额度池</td></tr>`}</tbody></table></div></div><div class="table-card"><div class="table-caption"><div><h2>池内 key</h2><p>「被引用」是撤销前必须看的影响面：一把 key 服务多台机器。</p></div><span class="muted">共 ${keys.length} 把</span></div><div class="table-scroll"><table><thead><tr><th>Key ID</th><th>尾号</th><th>所属池</th><th>状态</th><th>被引用</th><th>创建时间</th><th>撤销时间</th><th>备注</th><th>操作</th></tr></thead><tbody>${keyRows || `<tr><td colspan="9" class="muted">池里还没有 key</td></tr>`}</tbody></table></div></div>${createPoolModal}${createKeyModal}${bulkKeyModal}${editPoolModals}`
       )
     );
   });

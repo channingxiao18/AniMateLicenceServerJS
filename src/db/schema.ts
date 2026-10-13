@@ -478,6 +478,12 @@ export const llmTrialKeys = sqliteTable(
       .references(() => llmTrialPools.id),
     /** packAesBlob(iv, ciphertext) — plaintext never lands in the database. */
     apiKeyEnc: text("api_key_enc").notNull(),
+    /**
+     * Last 4 characters only, so the dashboard can tell two keys apart without
+     * ever decrypting one. Deliberately *not* derived per render: rendering must
+     * not touch plaintext secrets, and a revoked key keeps its hint.
+     */
+    keyHint: text("key_hint"),
     status: text("status").notNull().default("active"),
     note: text("note"),
     createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
