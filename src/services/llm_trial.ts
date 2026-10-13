@@ -104,6 +104,25 @@ function isPast(value: string, now = new Date()): boolean {
   return parseDbDate(value).getTime() <= now.getTime();
 }
 
+/**
+ * Normalise an operator-supplied expiry into the DB shape.
+ *
+ * Accepts epoch seconds (number or numeric string) or a `YYYY-MM-DD HH:MM[:SS]` /
+ * `YYYY-MM-DDTHH:MM[:SS]` stamp. Stamp strings are treated as UTC — the dashboard
+ * labels the field accordingly, and epoch seconds avoid the question entirely.
+ */
+export function normalizeValidUntil(value: number | string): string {
+  if (typeof value === "number") {
+    return dateToISOSeconds(new Date(value * 1000));
+  }
+  const trimmed = value.trim();
+  if (/^\d{9,}$/.test(trimmed)) {
+    return dateToISOSeconds(new Date(Number(trimmed) * 1000));
+  }
+  const normalized = trimmed.replace("T", " ");
+  return normalized.length === 16 ? `${normalized}:00` : normalized;
+}
+
 /** Region gate, same shape as catalog's `isCountryEligible`. */
 export function poolAllowsCountry(
   pool: Pick<LlmTrialPool, "excludedCountries">,
@@ -443,10 +462,10 @@ export async function createLlmTrialPool(
   if (!name || !baseUrl || !model) {
     throw new ActivationError("INVALID_REQUEST", "name / baseUrl / model 不能为空", 400);
   }
-  const validUntil =
-    typeof params.validUntil === "number"
-      ? dateToISOSeconds(new Date(params.validUntil * 1000))
-      : params.validUntil;
+  const validUntil = normalizeValidUntil(params.validUntil);
+  if (!validUntil || Number.isNaN(parseDbDate(validUntil).getTime())) {
+    throw new ActivationError("INVALID_REQUEST", "valid_until 无法解析", 400);
+  }
 
   const id = randomPoolId();
   await db.insert(llmTrialPools).values({

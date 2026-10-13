@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { Hono } from "hono";
 import { and, eq } from "drizzle-orm";
 import { createTestEnv, type TestEnv } from "./helpers/setup";
+import { createSession, SESSION_COOKIE } from "../src/middleware/auth";
 import { createV1Router } from "../src/routes/v1";
 import { createAdminApiRouter } from "../src/routes/admin_api";
+import { createAdminUiRouter } from "../src/routes/admin_ui";
 import { catalogFingerprintHashCandidates } from "../src/services/catalog";
 import { ActivationError } from "../src/services/activation";
 import { startTrial } from "../src/services/trial";
@@ -13,6 +16,7 @@ import {
   listLlmTrialKeys,
   listLlmTrialPools,
   llmTrialFingerprintHashCandidates,
+  normalizeValidUntil,
   poolAllowsCountry,
   revokeLlmTrialKey,
   setLlmTrialPoolStatus,
@@ -512,8 +516,7 @@ describe("llm trial admin views", () => {
 
 // ─── admin routes ─────────────────────────────────────────────────────────
 
-describe("llm trial admin routes", () => {
-  it("seeds a pool and key, reports blast radius, and revokes without echoing the key", async () => {
+describe("llm trial admin routes", () => {  it("seeds a pool and key, reports blast radius, and revokes without echoing the key", async () => {
     const env = await setup();
     const router = createAdminApiRouter(env.db, env.config, env.registry);
 
@@ -580,6 +583,68 @@ describe("llm trial admin routes", () => {
       body: JSON.stringify({ status: "paused" }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it("accepts a dashboard date-time string and normalises it to the DB shape", async () => {
+    const env = await setup();
+    const router = createAdminApiRouter(env.db, env.config, env.registry);
+
+    const res = await router.request("/llm-trial/pools", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "dated pool",
+        base_url: "https://gw.example/v1",
+        model: "m",
+        // What an <input type="datetime-local"> posts.
+        valid_until: "2027-03-05T14:30",
+      }),
+    });
+    expect(res.status).toBe(200);
+
+    const pools = await listLlmTrialPools(env.db);
+    expect(pools[0].validUntil).toBe("2027-03-05 14:30:00");
+    expect(pools[0].expired).toBe(false);
+  });
+
+  it("normalises epoch seconds and minute-precision stamps", () => {
+    expect(normalizeValidUntil(1_800_000_000)).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(normalizeValidUntil("1800000000")).toBe(normalizeValidUntil(1_800_000_000));
+    expect(normalizeValidUntil("2027-03-05 14:30")).toBe("2027-03-05 14:30:00");
+    expect(normalizeValidUntil("2027-03-05T14:30:00")).toBe("2027-03-05 14:30:00");
+    expect(normalizeValidUntil("2027-03-05 14:30:00")).toBe("2027-03-05 14:30:00");
+  });
+});
+
+describe("llm trial admin page", () => {
+  it("renders pool capacity, the unused-key signal and per-key blast radius", async () => {
+    const env = await setup();
+    const { keys } = await seedPool(env, { keyCount: 3, name: "第一批" });
+    await trialMachine(env, "m-page");
+    await issue(env, "m-page");
+
+    const app = new Hono();
+    app.route("/admin", createAdminUiRouter(env.db, env.config));
+    const session = await createSession("admin", env.config.sessionSecret);
+    const headers = { cookie: `${SESSION_COOKIE}=${session}` };
+
+    const res = await app.request("/admin/llm-trial", { headers });
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("试用额度");
+    expect(html).toContain("第一批");
+    expect(html).toContain("https://gw.example/v1");
+    // The unused-key signal is what tells an operator to top the pool up.
+    expect(html).toContain("未使用");
+    expect(html).toContain("被引用");
+    expect(html).toContain(keys[0].id);
+
+    // Revoking from the page must be reachable and must warn about the blast radius.
+    await revokeLlmTrialKey(env.db, keys[0].id);
+    const after = await app.request("/admin/llm-trial", { headers });
+    const afterHtml = await after.text();
+    expect(afterHtml).toContain("已撤销");
   });
 });
 

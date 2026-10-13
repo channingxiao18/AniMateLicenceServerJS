@@ -21,6 +21,7 @@ import {
 } from "../services/activation";
 import { formatPlanFeatures } from "../services/plan_features";
 import { readCatalogCardEnabled } from "../services/catalog";
+import { listLlmTrialKeys, listLlmTrialPools } from "../services/llm_trial";
 import { listTrialGrants } from "../services/trial";
 import { listFeedback } from "../services/feedback";
 import {
@@ -91,6 +92,7 @@ const navItems = [
   ["/admin/plans", "套餐"],
   ["/admin/licenses", "兑换码"],
   ["/admin/trials", "试用"],
+  ["/admin/llm-trial", "试用额度"],
   ["/admin/entitlements", "授权权益"],
   ["/admin/subscriptions", "订阅"],
   ["/admin/providers", "支付映射"],
@@ -433,6 +435,66 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
       })
       .join("");
     return c.html(shell("试用", "/admin/trials", `<div class="toolbar"><form method="get" class="actions"><input name="search" value="${e(search)}" placeholder="搜索指纹Hash/机器Hash/安装ID" style="width:260px"><button>搜索</button></form>${search ? `<a class="btn" href="/admin/trials">清除搜索</a>` : ""}</div><div class="toolbar"><div class="muted">查看试用记录、对应产品和套餐。试用最终发放的功能列表沿用套餐正式授权的功能列表。搜索支持 Trial ID、指纹 Hash、telemetry 机器 Hash 的完整值或前缀；也可以粘贴安装 ID（install_id），会自动反查其上报的机器后匹配试用记录。</div></div><table><thead><tr><th>Trial ID</th><th>状态</th><th>产品</th><th>套餐</th><th>正式功能列表</th><th>试用入口</th><th>时长(秒)</th><th>开始</th><th>到期</th><th title="悬停查看完整指纹 Hash 与机器 Hash">指纹哈希</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="11" class="muted">暂无试用记录</td></tr>`}</tbody></table><div class="muted" style="margin-top:10px">${search ? `搜索 “${e(search)}” 找到` : "共"} ${result.total} 条，当前第 ${page} 页</div>`));
+  });
+
+  // Trial LLM key pool (docs/plans/trial-llm-key-plan.md §3.5).
+  //
+  // Two things an operator must be able to see before pressing anything:
+  // how many keys are still unreferenced (that is the "top up the pool" signal)
+  // and how many machines a revoke would cut off.
+  router.get("/llm-trial", async (c) => {
+    const pools = await listLlmTrialPools(db);
+    const keys = await listLlmTrialKeys(db);
+
+    const poolOptions = pools
+      .map(
+        (p) =>
+          `<option value="${e(p.id)}">${e(p.name)}${p.status === "active" ? "" : "（已停用）"}</option>`
+      )
+      .join("");
+
+    const poolRows = pools
+      .map((p) => {
+        const expiring = p.expired ? `<span class="badge bad">已过期</span>` : "";
+        const low = !p.expired && p.status === "active" && p.unusedKeyCount === 0;
+        return `<tr><td><code>${e(p.id)}</code><div class="muted">${e(p.name)}</div></td><td>${badge(p.status)}${expiring}</td><td>${e(p.productId)}</td><td><code>${e(p.baseUrl)}</code><div class="muted">${e(p.model)}</div></td><td class="num-cell">${e(p.validUntil)}</td><td class="num-cell">${e(p.activeKeyCount)} / ${e(p.keyCount)}</td><td class="num-cell">${low ? `<span class="badge warn" title="池内每把 key 都已被至少一台机器引用">${e(p.unusedKeyCount)}</span>` : e(p.unusedKeyCount)}</td><td class="num-cell">${e(p.referencedMachines)}</td><td class="actions">${p.status === "active" ? `<form method="post" action="/admin/api/llm-trial/pools/${encodeURIComponent(p.id)}/status"><input type="hidden" name="status" value="disabled"><button class="danger" title="只影响新签发，已签发的机器不受影响">停用</button></form>` : `<form method="post" action="/admin/api/llm-trial/pools/${encodeURIComponent(p.id)}/status"><input type="hidden" name="status" value="active"><button>启用</button></form>`}</td></tr>`;
+      })
+      .join("");
+
+    const keyRows = keys
+      .map((k) => {
+        const pool = pools.find((p) => p.id === k.poolId);
+        const blast =
+          k.referencedMachines > 0
+            ? `<span class="badge warn" title="撤销会同时打断这些机器">${e(k.referencedMachines)} 台</span>`
+            : `<span class="badge muted">0 台</span>`;
+        return `<tr><td><code>${e(k.id)}</code></td><td>${e(pool?.name || k.poolId)}</td><td>${badge(k.status)}</td><td>${blast}</td><td class="num-cell">${e(k.createdAt)}</td><td class="num-cell">${e(k.revokedAt || "-")}</td><td>${e(k.note || "-")}</td><td class="actions">${k.status === "active" ? `<form method="post" action="/admin/api/llm-trial/keys/${encodeURIComponent(k.id)}/revoke" onsubmit="return confirm('撤销这把 key 会同时打断引用它的所有机器，确定继续？')"><button class="danger">撤销</button></form>` : `<span class="muted">已撤销</span>`}</td></tr>`;
+      })
+      .join("");
+
+    const createPoolModal = modal(
+      "create-llm-pool",
+      "新建额度池",
+      "/admin/api/llm-trial/pools",
+      `<div><label>名称</label><input name="name" placeholder="第 N 批" required></div><div><label>产品 ID</label><input name="product_id" value="animate" required></div><div><label>Base URL</label><input name="base_url" placeholder="https://gw.example.com/v1" required></div><div><label>Model</label><input name="model" placeholder="cheap-model" required></div><div><label>有效期（UTC，YYYY-MM-DD HH:MM；也接受 epoch 秒）</label><input name="valid_until" placeholder="2026-11-01 00:00" required></div><div><label>平台（留空 = 不限）</label><input name="platform" placeholder="windows"></div><div><label>备注</label><input name="note"></div>`,
+      "创建"
+    );
+
+    const createKeyModal = modal(
+      "create-llm-key",
+      "添加 key",
+      "/admin/api/llm-trial/keys",
+      `<div><label>所属池</label><select name="pool_id">${poolOptions}</select></div><div><label>API Key（第三方网关签发的那把）</label><input name="api_key" autocomplete="off" required></div><div><label>备注</label><input name="note"></div>`,
+      "添加"
+    );
+
+    return c.html(
+      shell(
+        "试用额度",
+        "/admin/llm-trial",
+        `${flash(c)}<div class="toolbar"><div class="muted">试用期内的机器通过 <code>POST /v1/llm/trial-profile</code> 领取这里的一把 key。分配顺序：优先取<b>还没有机器引用</b>的 key，同级取创建时间最新的。「未使用」长期为 0 就是该补池了。<br>停用池只挡新签发；撤销 key 会打断所有引用它的机器（撤销后不会自动改签）。</div><div class="actions"><a class="btn primary" href="#create-llm-pool">新建池</a><a class="btn" href="#create-llm-key">添加 key</a></div></div><div class="table-card"><div class="table-caption"><div><h2>额度池</h2><p>base_url / model / 有效期都挂在池上，换模型或换网关只要加一条池记录，客户端无需发版。</p></div></div><div class="table-scroll"><table><thead><tr><th>池</th><th>状态</th><th>产品</th><th>LLM</th><th>有效期</th><th>可用 key</th><th title="还没有任何机器引用的 key 数量">未使用</th><th>已引用机器</th><th>操作</th></tr></thead><tbody>${poolRows || `<tr><td colspan="9" class="muted">暂无额度池</td></tr>`}</tbody></table></div></div><div class="table-card"><div class="table-caption"><div><h2>池内 key</h2><p>「被引用」是撤销前必须看的影响面：一把 key 服务多台机器。</p></div><span class="muted">共 ${keys.length} 把</span></div><div class="table-scroll"><table><thead><tr><th>Key ID</th><th>所属池</th><th>状态</th><th>被引用</th><th>创建时间</th><th>撤销时间</th><th>备注</th><th>操作</th></tr></thead><tbody>${keyRows || `<tr><td colspan="8" class="muted">池里还没有 key</td></tr>`}</tbody></table></div></div>${createPoolModal}${createKeyModal}`
+      )
+    );
   });
 
   router.get("/providers", async (c) => {
