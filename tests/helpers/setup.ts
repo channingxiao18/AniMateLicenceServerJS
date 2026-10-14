@@ -216,7 +216,8 @@ CREATE INDEX IF NOT EXISTS telemetry_events_received_idx ON telemetry_events (re
 CREATE INDEX IF NOT EXISTS telemetry_events_product_event_idx ON telemetry_events (product_id, event, received_at);
 CREATE INDEX IF NOT EXISTS telemetry_events_machine_idx ON telemetry_events (machine_hash, received_at);
 CREATE INDEX IF NOT EXISTS telemetry_events_install_idx ON telemetry_events (install_id, received_at);
-CREATE INDEX IF NOT EXISTS telemetry_events_session_idx ON telemetry_events (session_id, received_at);
+-- telemetry_events_session_idx 与 telemetry_session_state_machine_idx 已由 migration 0016
+-- 删除（无查询使用、纯写放大），测试库不再创建，以保持与线上结构一致。
 
 CREATE TABLE IF NOT EXISTS telemetry_session_state (
   session_id text PRIMARY KEY NOT NULL,
@@ -234,7 +235,6 @@ CREATE TABLE IF NOT EXISTS telemetry_session_state (
   last_overlay_visible_secs integer DEFAULT 0 NOT NULL,
   updated_at text DEFAULT (datetime('now')) NOT NULL
 );
-CREATE INDEX IF NOT EXISTS telemetry_session_state_machine_idx ON telemetry_session_state (machine_hash, updated_at);
 
 CREATE TABLE IF NOT EXISTS telemetry_daily_metrics (
   day text NOT NULL,

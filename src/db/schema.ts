@@ -270,7 +270,9 @@ export const telemetryEvents = sqliteTable(
     ),
     machineIdx: index("telemetry_events_machine_idx").on(table.machineHash, table.receivedAt),
     installIdx: index("telemetry_events_install_idx").on(table.installId, table.receivedAt),
-    sessionIdx: index("telemetry_events_session_idx").on(table.sessionId, table.receivedAt),
+    // telemetry_events_session_idx (session_id, received_at) 已由 migration 0016 删除：
+    // session_id 只在 `LIKE '%…%'` 这类两侧带通配符的查询里出现，索引用不上，
+    // 却要为每条事件写一条索引项。不要加回来。
   })
 );
 
@@ -291,10 +293,11 @@ export const telemetrySessionState = sqliteTable(
     lastProcessDurationSecs: integer("last_process_duration_secs").notNull().default(0),
     lastOverlayVisibleSecs: integer("last_overlay_visible_secs").notNull().default(0),
     updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
-  },
-  (table) => ({
-    machineIdx: index("telemetry_session_state_machine_idx").on(table.machineHash, table.updatedAt),
-  })
+  }
+  // 这里原本还有 telemetry_session_state_machine_idx (machine_hash, updated_at)，
+  // 已由 migration 0016 删除：没有任何查询按 machine_hash 访问这张表，而该索引第二列
+  // 是 updated_at —— 每次心跳 UPSERT 都会改它，等于每次心跳都删+插一条索引项。
+  // 不要加回来。
 );
 
 export const telemetryDailyMetrics = sqliteTable(

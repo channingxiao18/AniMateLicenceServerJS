@@ -1,4 +1,4 @@
-import { and, count, desc, eq, gte, inArray, like, lte, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, isNotNull, like, lte, sql } from "drizzle-orm";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/index";
 import {
@@ -345,14 +345,10 @@ export async function recordTelemetryEvent(
   const envelope = validateEnvelope(body);
   const receivedAtUnix = Math.floor(now.getTime() / 1000);
   const receivedAt = toSqlDateTime(now);
-  const existing = await db
-    .select({ eventId: telemetryEvents.eventId })
-    .from(telemetryEvents)
-    .where(eq(telemetryEvents.eventId, envelope.eventId))
-    .get();
-  if (existing) return { ok: true, duplicate: true };
-
-  await db.insert(telemetryEvents).values({
+  // 去重与写入合成一条语句：原来的「先 SELECT 再 INSERT」每条事件多一次行读和一次
+  // 往返，而且两步之间不原子 —— 同一 event_id 并发重放时两个请求都会通过 SELECT，
+  // 后到的 INSERT 撞主键抛错，上报端收到 500。
+  const inserted = await db.insert(telemetryEvents).values({
     eventId: envelope.eventId,
     schemaVersion: envelope.schemaVersion,
     event: envelope.event,
@@ -371,7 +367,9 @@ export async function recordTelemetryEvent(
     activationId: envelope.activationId,
     payloadJson: JSON.stringify(envelope.payload),
     rawJson: JSON.stringify(envelope.raw),
-  });
+  }).onConflictDoNothing({ target: telemetryEvents.eventId })
+    .returning({ eventId: telemetryEvents.eventId });
+  if (!inserted.length) return { ok: true, duplicate: true };
 
   try {
     await updateAggregates(db, envelope, sourceId, receivedAtUnix, receivedAt);
@@ -1071,7 +1069,7 @@ export async function getTelemetryMachineUsage(
 
   const [events, uniques] = await Promise.all([
     db
-      .select()
+      .select(EVENT_LIST_COLUMNS)
       .from(telemetryEvents)
       .where(
         and(
@@ -1561,7 +1559,7 @@ async function loadNewInstallationActions(
   const installationDayById = new Map(installations.map((row) => [row.installId, row.firstInstalledDay]));
   if (!installationDayById.size) return new Map();
 
-  const events = await db.select().from(telemetryEvents).where(and(
+  const events = await db.select(EVENT_LIST_COLUMNS).from(telemetryEvents).where(and(
     eq(telemetryEvents.productId, productId),
     inArray(telemetryEvents.event, [...NEW_INSTALLATION_ACTION_EVENTS]),
     gte(telemetryEvents.receivedAt, `${start} 00:00:00`),
@@ -1579,11 +1577,21 @@ async function loadNewInstallationActions(
   return actionsByInstall;
 }
 
-async function loadInstallations(db: Database, productId: string): Promise<InstallationReportRow[]> {
-  const events = await db.select().from(telemetryEvents).where(and(
+async function loadInstallations(
+  db: Database,
+  productId: string,
+  installIds?: string[]
+): Promise<InstallationReportRow[]> {
+  if (installIds && !installIds.length) return [];
+  const conditions = [
     eq(telemetryEvents.productId, productId),
-    eq(telemetryEvents.event, "install_seen")
-  )).orderBy(telemetryEvents.receivedAt).all();
+    eq(telemetryEvents.event, "install_seen"),
+  ];
+  // 明细页只要当前这一页设备的首次安装时间：按 install_id 收窄后走
+  // (install_id, received_at) 索引，扫的是几十台设备，而不是全历史的 install_seen。
+  if (installIds) conditions.push(inArray(telemetryEvents.installId, installIds));
+  const events = await db.select(EVENT_LIST_COLUMNS).from(telemetryEvents)
+    .where(and(...conditions)).orderBy(telemetryEvents.receivedAt).all();
   const firstByInstall = new Map<string, InstallationReportRow>();
   for (const event of events) {
     if (!event.installId || firstByInstall.has(event.installId)) continue;
@@ -1609,6 +1617,16 @@ export async function getActivityDays(
 ) {
   const days = reportDays(params.days);
   const productId = params.productId || "animate";
+  return cachedReport(`activity:${productId}:${days}`, () =>
+    getActivityDaysUncached(db, { days, productId })
+  );
+}
+
+async function getActivityDaysUncached(
+  db: Database,
+  params: { days: number; productId: string }
+) {
+  const { days, productId } = params;
   const start = daysAgo(days - 1);
   const activity = await loadDailyDeviceActivity(db, productId, start, daysAgo(0));
   const byDay = new Map<string, { devices: number; activeSecs: number; launches: number }>();
@@ -1644,22 +1662,46 @@ export async function listActiveDevicesForDay(
   const productId = params.productId || "animate";
   const page = Math.max(1, Math.floor(params.page || 1));
   const pageSize = Math.min(100, Math.max(1, Math.floor(params.pageSize || 25)));
-  const daily = await loadDailyDeviceActivity(db, productId, params.day, params.day);
-  const lifetime = await loadLifetimeUsageByInstall(db, productId);
-  const installations = new Map((await loadInstallations(db, productId)).map((row) => [row.installId, row]));
-  const all = daily.map((row) => ({
-    ...row,
-    firstInstalledAt: installations.get(row.installId)?.firstInstalledAt || null,
-    lifetimeActiveSecs: lifetime.get(row.installId)?.activeSecs || 0,
-    lifetimeOverlayVisibleSecs: lifetime.get(row.installId)?.overlayVisibleSecs || 0,
-  }))
-    .sort((a, b) => b.activeSecs - a.activeSecs || b.lastActiveAt.localeCompare(a.lastActiveAt));
+  // 排序在内存里做（当天最多几百台设备），但「历史累计时长」和「安装日期」两列
+  // 只在选好这一页之后按 install_id 去取。旧实现为了渲染 25 行，把全历史的会话
+  // 事件（生产库已 11 万行 / 100+ MB）整张拉进 Worker，触发了 128 MB 内存上限，
+  // 这才是活跃设备表格稳定报 SERVER_ERROR 的直接原因。
+  const all = await cachedDeviceActivityForDay(db, productId, params.day);
+  const pageRows = all.slice((page - 1) * pageSize, page * pageSize);
+  const installIds = Array.from(new Set(pageRows.map((row) => row.installId)));
+  const [lifetime, installations] = await Promise.all([
+    loadLifetimeUsageByInstall(db, productId, installIds),
+    loadInstallations(db, productId, installIds),
+  ]);
+  const installationById = new Map(installations.map((row) => [row.installId, row]));
   return {
-    items: all.slice((page - 1) * pageSize, page * pageSize),
+    items: pageRows.map((row) => ({
+      ...row,
+      firstInstalledAt: installationById.get(row.installId)?.firstInstalledAt || null,
+      lifetimeActiveSecs: lifetime.get(row.installId)?.activeSecs || 0,
+      lifetimeOverlayVisibleSecs: lifetime.get(row.installId)?.overlayVisibleSecs || 0,
+    })),
     total: all.length,
     page,
     pageSize,
   };
+}
+
+/**
+ * 单日活跃设备，按当日活跃时长倒序。只依赖当天（外加前一天作为跨天会话基线）的
+ * 数据，与页码无关，所以整页结果可以缓存：翻页不再重算一次全量扫描。
+ */
+async function cachedDeviceActivityForDay(
+  db: Database,
+  productId: string,
+  day: string
+): Promise<DailyDeviceActivity[]> {
+  return cachedReport(`activity-day:${productId}:${day}`, async () => {
+    const daily = await loadDailyDeviceActivity(db, productId, day, day);
+    return daily.sort(
+      (a, b) => b.activeSecs - a.activeSecs || b.lastActiveAt.localeCompare(a.lastActiveAt)
+    );
+  });
 }
 
 type DailyDeviceActivity = {
@@ -1680,49 +1722,146 @@ type DailyDeviceActivity = {
   lastActiveAt: string;
 };
 
+// 活跃设备明细/列表的候选事件集合。与后台「设备总览」共用一套口径，两处必须一致：
+// PRODUCT_EVENT_NAMES 里的事件即使当天没有会话事件，也会让该设备当天成为「活跃设备」，
+// 所以这里不能收窄成只留 session_*（实测会让 30 天里 8 天的设备数变少）。
+const DEVICE_ACTIVITY_EVENTS = [
+  "session_start",
+  "session_heartbeat",
+  "session_checkpoint",
+  "session_end",
+  "session_unclean_end",
+  "session_unclean_detected",
+  "surface_event",
+  ...PRODUCT_EVENT_NAMES,
+];
+
+// 只有这 5 种事件带时长字段；活跃时长的增量只由它们决定。
+const SESSION_DURATION_EVENTS = [
+  "session_heartbeat",
+  "session_checkpoint",
+  "session_end",
+  "session_unclean_end",
+  "session_unclean_detected",
+];
+
+const SESSION_DURATION_EVENT_LIST = sql.join(
+  SESSION_DURATION_EVENTS.map((event) => sql`${event}`),
+  sql`, `
+);
+
+// 只取这两个页面真正会读的 11 列，不再 SELECT *（raw_json 一列就占全库文本的 66%，
+// 任何报表都不读它）。payload_json 也只对上面 5 种时长事件取值：其余事件
+// （session_start / surface_event / 各种产品事件）只是让设备当天算活跃，payload
+// 原本读了就丢。置 NULL 后返回行数不变（D1 按 rows_read 计费，所以读额度不变），
+// 省的是 D1 传回 Worker 的字节和 JS 里的字符串内存 —— 而 500 正是内存爆掉导致的。
+const DEVICE_ACTIVITY_COLUMNS = {
+  event: telemetryEvents.event,
+  installId: telemetryEvents.installId,
+  sessionId: telemetryEvents.sessionId,
+  receivedAt: telemetryEvents.receivedAt,
+  productId: telemetryEvents.productId,
+  machineHash: telemetryEvents.machineHash,
+  sourceId: telemetryEvents.sourceId,
+  platform: telemetryEvents.platform,
+  channel: telemetryEvents.channel,
+  appVersion: telemetryEvents.appVersion,
+  licenseState: telemetryEvents.licenseState,
+  payloadJson: sql<string | null>`CASE WHEN ${telemetryEvents.event} IN (${SESSION_DURATION_EVENT_LIST}) THEN ${telemetryEvents.payloadJson} ELSE NULL END`,
+};
+
+// 每次往 Worker 里拉多少天的事件。行数因此有上界，内存不随查询窗口线性增长。
+const DEVICE_ACTIVITY_CHUNK_DAYS = 3;
+
+function deviceActivityPayload(payloadJson: string | null): Record<string, unknown> {
+  if (!payloadJson) return {};
+  try {
+    const parsed = JSON.parse(payloadJson);
+    return isObject(parsed) ? parsed : {};
+  } catch {
+    // 历史脏 payload 不参与计数，原始事件本身仍然留着可查。
+    return {};
+  }
+}
+
 async function loadDailyDeviceActivity(
   db: Database,
   productId: string,
   start: string,
   end: string
 ): Promise<DailyDeviceActivity[]> {
-  const sessionEvents = [
-    "session_start",
-    "session_heartbeat",
-    "session_checkpoint",
-    "session_end",
-    "session_unclean_end",
-    "session_unclean_detected",
-    "surface_event",
-    ...PRODUCT_EVENT_NAMES,
-  ];
-  const events = await db.select().from(telemetryEvents).where(and(
-    eq(telemetryEvents.productId, productId),
-    inArray(telemetryEvents.event, sessionEvents),
-    gte(telemetryEvents.receivedAt, `${addUtcDays(start, -1)} 00:00:00`),
-    lte(telemetryEvents.receivedAt, `${end} 23:59:59`)
-  )).orderBy(telemetryEvents.receivedAt).all();
   const rows = new Map<string, DailyDeviceActivity>();
   const sessionDurations = new Map<string, { process: number; visible: number }>();
+  // 窗口前一天的事件只用来给「跨天会话」做时长基线，而这个基线只吃 5 种时长事件。
+  // 因此不必把当天全部 70 种候选事件读进来（原来非时长事件读了就丢），
+  // 实录 2026-10-06：全量 6,773 行 -> 只读时长事件 3,962 行，结果完全一致。
+  await seedSessionDurations(db, productId, addUtcDays(start, -1), sessionDurations);
+  // 分块读取：received_at 前缀就是日期，块与块首尾相接且全局有序，跨块又沿用同一个
+  // sessionDurations 基线，所以分块结果与「一次拉整个窗口」完全一致。
+  let cursor = start;
+  while (cursor <= end) {
+    const candidate = addUtcDays(cursor, DEVICE_ACTIVITY_CHUNK_DAYS - 1);
+    const to = candidate < end ? candidate : end;
+    await accumulateDeviceActivity(db, productId, cursor, to, sessionDurations, rows);
+    cursor = addUtcDays(to, 1);
+  }
+  return Array.from(rows.values());
+}
+
+/**
+ * 把窗口开始日之前那一天的会话时长读成基线。规则与旧实现的前置分支逐字一致：
+ * 只认同时带 install_id 与 session_id 的时长事件，且只有「值不减」时才覆盖（取较大值）。
+ */
+async function seedSessionDurations(
+  db: Database,
+  productId: string,
+  day: string,
+  sessionDurations: Map<string, { process: number; visible: number }>
+): Promise<void> {
+  const events = await db.select({
+    event: telemetryEvents.event,
+    sessionId: telemetryEvents.sessionId,
+    payloadJson: telemetryEvents.payloadJson,
+  }).from(telemetryEvents).where(and(
+    eq(telemetryEvents.productId, productId),
+    inArray(telemetryEvents.event, SESSION_DURATION_EVENTS),
+    isNotNull(telemetryEvents.installId),
+    gte(telemetryEvents.receivedAt, `${day} 00:00:00`),
+    lte(telemetryEvents.receivedAt, `${day} 23:59:59`)
+  )).orderBy(telemetryEvents.receivedAt).all();
+
+  for (const event of events) {
+    if (!event.sessionId) continue;
+    const payload = deviceActivityPayload(event.payloadJson);
+    const process = safePayloadDuration(payload, "process_duration_secs");
+    const visible = sessionVisibleSecs(payload, event.event);
+    const previous = sessionDurations.get(event.sessionId) || { process: 0, visible: 0 };
+    if (process >= previous.process || visible >= previous.visible) {
+      sessionDurations.set(event.sessionId, {
+        process: Math.max(previous.process, process),
+        visible: Math.max(previous.visible, visible),
+      });
+    }
+  }
+}
+
+async function accumulateDeviceActivity(
+  db: Database,
+  productId: string,
+  from: string,
+  to: string,
+  sessionDurations: Map<string, { process: number; visible: number }>,
+  rows: Map<string, DailyDeviceActivity>
+): Promise<void> {
+  const events = await db.select(DEVICE_ACTIVITY_COLUMNS).from(telemetryEvents).where(and(
+    eq(telemetryEvents.productId, productId),
+    inArray(telemetryEvents.event, DEVICE_ACTIVITY_EVENTS),
+    gte(telemetryEvents.receivedAt, `${from} 00:00:00`),
+    lte(telemetryEvents.receivedAt, `${to} 23:59:59`)
+  )).orderBy(telemetryEvents.receivedAt).all();
   for (const event of events) {
     if (!event.installId) continue;
     const day = event.receivedAt.slice(0, 10);
-    if (day < start) {
-      if (event.sessionId && ["session_heartbeat", "session_checkpoint", "session_end", "session_unclean_end", "session_unclean_detected"].includes(event.event)) {
-        let payload: Record<string, unknown> = {};
-        try { payload = JSON.parse(event.payloadJson); } catch { /* Ignore malformed history. */ }
-        const process = safePayloadDuration(payload, "process_duration_secs");
-        const visible = sessionVisibleSecs(payload, event.event);
-        const previous = sessionDurations.get(event.sessionId) || { process: 0, visible: 0 };
-        if (process >= previous.process || visible >= previous.visible) {
-          sessionDurations.set(event.sessionId, {
-            process: Math.max(previous.process, process),
-            visible: Math.max(previous.visible, visible),
-          });
-        }
-      }
-      continue;
-    }
     const key = `${day}\u0000${event.installId}`;
     const row = rows.get(key) || {
       day,
@@ -1752,9 +1891,8 @@ async function loadDailyDeviceActivity(
       row.launches += 1;
       row.sessions += 1;
     }
-    if (event.sessionId && ["session_heartbeat", "session_checkpoint", "session_end", "session_unclean_end", "session_unclean_detected"].includes(event.event)) {
-      let payload: Record<string, unknown> = {};
-      try { payload = JSON.parse(event.payloadJson); } catch { /* Ignore malformed history. */ }
+    if (event.sessionId && SESSION_DURATION_EVENTS.includes(event.event)) {
+      const payload = deviceActivityPayload(event.payloadJson);
       const process = safePayloadDuration(payload, "process_duration_secs");
       const visible = sessionVisibleSecs(payload, event.event);
       const previous = sessionDurations.get(event.sessionId) || { process: 0, visible: 0 };
@@ -1764,7 +1902,6 @@ async function loadDailyDeviceActivity(
     }
     rows.set(key, row);
   }
-  return Array.from(rows.values());
 }
 
 async function getRetentionReportUncached(
@@ -1818,16 +1955,26 @@ async function getRetentionReportUncached(
   return { filters: { days, productId }, offsets, rows, summary };
 }
 
+/**
+ * 每个 install 的历史累计时长。口径与原实现完全一致（按 received_at 顺序，对每个
+ * session 累加「相对上一次报值的增量」），只是多了一个 install_id 收窄参数：
+ * 活跃设备明细页只需要当前这一页的几十台设备，不需要全库 2000 台的历史。
+ */
 async function loadLifetimeUsageByInstall(
   db: Database,
   productId: string,
+  installIds?: string[],
 ): Promise<Map<string, { activeSecs: number; overlayVisibleSecs: number }>> {
-  const events = await db.select().from(telemetryEvents).where(and(
+  const result = new Map<string, { activeSecs: number; overlayVisibleSecs: number }>();
+  if (installIds && !installIds.length) return result;
+  const conditions = [
     eq(telemetryEvents.productId, productId),
     inArray(telemetryEvents.event, ["session_start", "session_checkpoint", "session_heartbeat", "session_end", "session_unclean_end"]),
-  )).orderBy(telemetryEvents.receivedAt).all();
+  ];
+  if (installIds) conditions.push(inArray(telemetryEvents.installId, installIds));
+  const events = await db.select(EVENT_LIST_COLUMNS).from(telemetryEvents)
+    .where(and(...conditions)).orderBy(telemetryEvents.receivedAt).all();
   const sessionMax = new Map<string, { process: number; overlay: number; installId: string }>();
-  const result = new Map<string, { activeSecs: number; overlayVisibleSecs: number }>();
   for (const event of events) {
     if (!event.installId || !event.sessionId || event.event === "session_start") continue;
     let payload: Record<string, unknown> = {};
@@ -1854,7 +2001,7 @@ async function getStartupDiagnosticsUncached(
 ) {
   const day = params.day || new Date().toISOString().slice(0, 10);
   const productId = params.productId || "animate";
-  const events = await db.select().from(telemetryEvents).where(and(
+  const events = await db.select(EVENT_LIST_COLUMNS).from(telemetryEvents).where(and(
     eq(telemetryEvents.productId, productId),
     gte(telemetryEvents.receivedAt, `${day} 00:00:00`),
     lte(telemetryEvents.receivedAt, `${day} 23:59:59`),
@@ -2023,7 +2170,7 @@ async function getProductAnalyticsReportUncached(
   if (params.licenseState) conditions.push(eq(telemetryEvents.licenseState, params.licenseState));
 
   const rows = await db
-    .select()
+    .select(EVENT_LIST_COLUMNS)
     .from(telemetryEvents)
     .where(and(...conditions))
     .orderBy(telemetryEvents.receivedAt)

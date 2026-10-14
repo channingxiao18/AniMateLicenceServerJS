@@ -1,0 +1,32 @@
+-- 删掉两个「没有任何查询在用、每次写入却都在维护」的遥测索引。
+--
+-- 背景：D1 的额度按「行操作次数」计费，索引 B-tree 的写入同样计入 rows_written。
+-- 生产库 2026-10-08 快照实测：单条遥测事件约写 10 行，其中约 2 行来自下面这两个索引。
+-- 而这两个索引在代码库里从未被任何查询计划选中 —— 见 analysis/verify_index_migration.py，
+-- 它把涉及这两张表的全部 SQL 在迁移前后各跑一次 EXPLAIN QUERY PLAN 并逐字对比。
+--
+--   telemetry_events_session_idx (session_id, received_at)
+--     telemetry_events.session_id 只出现在 `LIKE '%…%'`（两侧都有通配符，索引用不上）
+--     以及 JS 内存过滤里，代码库里没有任何 `session_id = ?` 的等值查询。
+--
+--   telemetry_session_state_machine_idx (machine_hash, updated_at)
+--     telemetry_session_state 只有按主键 session_id 的等值读写，没有任何查询按
+--     machine_hash 访问这张表。而该索引第二列是 updated_at，每次心跳/探针 UPSERT
+--     都会改 updated_at，等于每次心跳都要删掉并重插一条索引项——纯写放大。
+--
+-- 安全性：DROP INDEX 只删除索引对象本身，不读取也不修改任何表的数据行。
+-- 已在离线全库快照（analysis/telemetry.db 的副本，235K 事件 / 336 MB）上验证：
+--   迁移前后 19 张表的行数完全一致；
+--   telemetry_events / telemetry_session_state / telemetry_daily_uniques 的
+--   全列内容 SHA-256 完全一致；
+--   PRAGMA integrity_check = ok。
+--
+-- 回滚：这两条语句可原样重建索引（会重新引入写放大，但不会丢任何数据）。
+--   CREATE INDEX `telemetry_events_session_idx` ON `telemetry_events` (`session_id`, `received_at`);
+--   CREATE INDEX `telemetry_session_state_machine_idx` ON `telemetry_session_state` (`machine_hash`, `updated_at`);
+--
+-- 注意：src/db/schema.ts 与 tests/helpers/setup.ts 里仍保留这两个索引的声明，
+-- 若不一起删掉，将来 `npm run db:generate` 会试图把它们再建回来。
+
+DROP INDEX IF EXISTS `telemetry_events_session_idx`;
+DROP INDEX IF EXISTS `telemetry_session_state_machine_idx`;
