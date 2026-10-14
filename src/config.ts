@@ -29,9 +29,12 @@ export interface AppConfig {
   trialFullFeatureDurationSeconds: number;
   trialTimeCheckToken: string;
   trialFingerprintSalt: string;
-  // Trial LLM key pool (docs/plans/trial-llm-key-plan.md §3). Disabled by
-  // default — flip TRIAL_LLM_ENABLED only after a pool and its keys are seeded.
-  trialLlmEnabled: boolean;
+  // Trial LLM key pool (docs/plans/trial-llm-key-plan.md §3). There is
+  // deliberately NO env-var gate here: the on/off switch is the dashboard flag in
+  // `llm_trial_settings` (absent = off). An env gate would have to be flipped by a
+  // redeploy, which defeats the point of the switch — and two gates with the DB
+  // winning is two sources of truth. Deploying changes nothing until an operator
+  // turns it on.
   /** How many keys one machine may ever be issued (1 = strictly one, no re-issue). */
   trialLlmMaxProfilesPerMachine: number;
   /** Per-machine soft turn cap handed to the client as `quota.max_requests`. */
@@ -117,7 +120,6 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
       env.TRIAL_FINGERPRINT_SALT ||
       env.SESSION_SECRET ||
       "change_me_trial_fingerprint_salt",
-    trialLlmEnabled: (env.TRIAL_LLM_ENABLED || "false").toLowerCase() === "true",
     trialLlmMaxProfilesPerMachine: parseInt(
       env.TRIAL_LLM_MAX_PROFILES_PER_MACHINE || "1",
       10

@@ -48,12 +48,11 @@ function past(): number {
 }
 
 async function setup(
-  overrides: Partial<{ enabled: boolean; masterEnabled: boolean }> = {}
+  overrides: Partial<{ masterEnabled: boolean }> = {}
 ): Promise<TestEnv> {
   const env = await createTestEnv();
-  env.config.trialLlmEnabled = overrides.enabled ?? true;
-  // The dashboard master switch defaults to OFF; tests that exercise issuance
-  // have to turn it on, exactly like an operator would.
+  // The dashboard switch is the ONLY gate, and it defaults to OFF; tests that
+  // exercise issuance have to turn it on, exactly like an operator would.
   await writeLlmTrialEnabled(env.db, overrides.masterEnabled ?? true);
   return env;
 }
@@ -169,8 +168,8 @@ describe("llm trial pure helpers", () => {
 // ─── gating ───────────────────────────────────────────────────────────────
 
 describe("llm trial gating", () => {
-  it("is inert until TRIAL_LLM_ENABLED is on", async () => {
-    const env = await setup({ enabled: false });
+  it("is inert while the dashboard switch is off", async () => {
+    const env = await setup({ masterEnabled: false });
     await seedPool(env, { keyCount: 1 });
     await trialMachine(env, "m-disabled");
 
@@ -798,8 +797,9 @@ describe("llm trial bulk keys and hint", () => {
 
 describe("llm trial master switch", () => {
   it("defaults to off, so a deploy issues nothing until an operator enables it", async () => {
+    // Deliberately no `setup()` here: it would turn the switch on. A fresh test
+    // env is exactly the "deployed but nobody touched the dashboard yet" state.
     const env = await createTestEnv();
-    env.config.trialLlmEnabled = true; // env gate on, dashboard gate untouched
     await seedPool(env, { keyCount: 1 });
     await trialMachine(env, "m-master-off");
 
@@ -960,8 +960,8 @@ describe("llm trial route", () => {
     expect(body.quota).toEqual({ max_requests: 60 });
   });
 
-  it("returns 403 TRIAL_LLM_DISABLED while the feature flag is off", async () => {
-    const env = await setup({ enabled: false });
+  it("returns 403 TRIAL_LLM_DISABLED while the dashboard switch is off", async () => {
+    const env = await setup({ masterEnabled: false });
     await seedPool(env, { keyCount: 1 });
     await startTrialFor(env, "m-route-off");
     const router = createV1Router(env.db, env.config, env.registry);

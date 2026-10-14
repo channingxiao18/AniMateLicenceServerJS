@@ -380,13 +380,10 @@ export async function issueTrialLlmProfile(
     country?: string | null;
   }
 ): Promise<TrialLlmProfileResponse> {
-  if (!config.trialLlmEnabled) {
-    throw new ActivationError("TRIAL_LLM_DISABLED", "试用额度暂未开放", 403);
-  }
-
-  // Checked BEFORE the idempotent return on purpose: a global stop that left
-  // already-issued machines running would not be a stop. The client treats this
-  // code as terminal and silently falls back to the config-wall path.
+  // The single gate. Checked BEFORE the idempotent return on purpose: a global
+  // stop that left already-issued machines running would not be a stop. The
+  // client treats this code as terminal and silently falls back to the
+  // config-wall path. Absent key = off, so deploying this changes nothing.
   if (!(await readLlmTrialEnabled(db))) {
     throw new ActivationError("TRIAL_LLM_DISABLED", "试用额度暂未开放", 403);
   }

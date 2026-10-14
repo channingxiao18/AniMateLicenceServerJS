@@ -440,7 +440,6 @@ export function createTestConfig(rsaPrivateKeyPkcs8Hex: string): AppConfig {
     trialFullFeatureDurationSeconds: 86400,
     trialTimeCheckToken: "animate-trial-time-check-v1",
     trialFingerprintSalt: "test_trial_salt",
-    trialLlmEnabled: false,
     trialLlmMaxProfilesPerMachine: 1,
     trialLlmSoftMaxRequests: 60,
     trialLlmReuseReferencedKeys: true,
