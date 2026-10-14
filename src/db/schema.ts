@@ -496,8 +496,7 @@ export const llmTrialKeys = sqliteTable(
   })
 );
 
-export const llmTrialGrants = sqliteTable(
-  "llm_trial_grants",
+export const llmTrialGrants = sqliteTable("llm_trial_grants",
   {
     grantId: text("grant_id").primaryKey(),
     fingerprintHash: text("fingerprint_hash").notNull(),
@@ -518,6 +517,16 @@ export const llmTrialGrants = sqliteTable(
     keyIdx: index("llm_trial_grants_key_idx").on(table.keyId),
   })
 );
+
+// Dashboard master switch for trial LLM issuance. Key-value for the same reason
+// as catalog_settings: an emergency stop must not need a redeploy. Absent key =
+// OFF, so deploying this feature changes nothing until an operator enables it.
+// OFF stops ALL issuance, including machines that already hold a key.
+export const llmTrialSettings = sqliteTable("llm_trial_settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
+});
 
 // One row per claim — the quota record ("N per machine") and the analysis
 // ledger. Rows count against quota unless status = 'refunded'; retries of the

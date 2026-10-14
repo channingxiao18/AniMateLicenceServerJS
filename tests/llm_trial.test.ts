@@ -22,6 +22,8 @@ import {
   revokeLlmTrialKey,
   setLlmTrialPoolStatus,
   updateLlmTrialPool,
+  readLlmTrialEnabled,
+  writeLlmTrialEnabled,
 } from "../src/services/llm_trial";
 import { auditLogs, llmTrialGrants, llmTrialKeys, llmTrialPools } from "../src/db/schema";
 
@@ -45,9 +47,14 @@ function past(): number {
   return Math.floor(Date.now() / 1000) - 60;
 }
 
-async function setup(overrides: Partial<{ enabled: boolean }> = {}): Promise<TestEnv> {
+async function setup(
+  overrides: Partial<{ enabled: boolean; masterEnabled: boolean }> = {}
+): Promise<TestEnv> {
   const env = await createTestEnv();
   env.config.trialLlmEnabled = overrides.enabled ?? true;
+  // The dashboard master switch defaults to OFF; tests that exercise issuance
+  // have to turn it on, exactly like an operator would.
+  await writeLlmTrialEnabled(env.db, overrides.masterEnabled ?? true);
   return env;
 }
 
@@ -786,6 +793,95 @@ describe("llm trial bulk keys and hint", () => {
     const serialized = JSON.stringify(rows);
     expect(serialized).not.toContain("sk-audit-secret-9876");
     expect(serialized).not.toContain("sk-");
+  });
+});
+
+describe("llm trial master switch", () => {
+  it("defaults to off, so a deploy issues nothing until an operator enables it", async () => {
+    const env = await createTestEnv();
+    env.config.trialLlmEnabled = true; // env gate on, dashboard gate untouched
+    await seedPool(env, { keyCount: 1 });
+    await trialMachine(env, "m-master-off");
+
+    expect(await readLlmTrialEnabled(env.db)).toBe(false);
+
+    const err = await catchActivationError(() => issue(env, "m-master-off"));
+    expect(err.error).toBe("TRIAL_LLM_DISABLED");
+    expect(err.statusCode).toBe(403);
+  });
+
+  it("stops machines that already hold a key — that is what a kill switch means", async () => {
+    const env = await setup();
+    await seedPool(env, { keyCount: 1 });
+    await trialMachine(env, "m-killed");
+    const issued = await issue(env, "m-killed");
+    expect(issued.llm.api_key).toContain("sk-");
+
+    await writeLlmTrialEnabled(env.db, false);
+
+    const err = await catchActivationError(() => issue(env, "m-killed"));
+    expect(err.error).toBe("TRIAL_LLM_DISABLED");
+  });
+
+  it("resumes the same key once re-enabled", async () => {
+    const env = await setup();
+    await seedPool(env, { keyCount: 1 });
+    await trialMachine(env, "m-resume");
+    const first = await issue(env, "m-resume");
+
+    await writeLlmTrialEnabled(env.db, false);
+    await catchActivationError(() => issue(env, "m-resume"));
+    await writeLlmTrialEnabled(env.db, true);
+
+    const again = await issue(env, "m-resume");
+    expect(again.grant_id).toBe(first.grant_id);
+    expect(again.llm.api_key).toBe(first.llm.api_key);
+  });
+
+  it("is reachable from the admin API and audited", async () => {
+    const env = await setup({ masterEnabled: false });
+    const router = createAdminApiRouter(env.db, env.config, env.registry);
+
+    const before = (await (await router.request("/llm-trial/enabled")).json()) as {
+      enabled: boolean;
+    };
+    expect(before.enabled).toBe(false);
+
+    const set = await router.request("/llm-trial/enabled", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: true }),
+    });
+    expect(set.status).toBe(200);
+    expect(await readLlmTrialEnabled(env.db)).toBe(true);
+
+    const rows = await env.db.select().from(auditLogs).all();
+    expect(rows.map((row) => row.action)).toContain("llm_trial_enable");
+
+    const bad = await router.request("/llm-trial/enabled", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: "maybe" }),
+    });
+    expect(bad.status).toBe(400);
+  });
+
+  it("renders the switch on the dashboard, showing the default-off state", async () => {
+    const env = await setup({ masterEnabled: false });
+    const app = new Hono();
+    app.route("/admin", createAdminUiRouter(env.db, env.config));
+    const session = await createSession("admin", env.config.sessionSecret);
+
+    const res = await app.request("/admin/llm-trial", {
+      headers: { cookie: `${SESSION_COOKIE}=${session}` },
+    });
+    const html = await res.text();
+    expect(res.status).toBe(200);
+    expect(html).toContain("总开关");
+    expect(html).toContain("已关停（默认）");
+    expect(html).toContain("/admin/api/llm-trial/enabled");
+    // The kill switch must say out loud that it also stops issued machines.
+    expect(html).toContain("连已签发的机器也停");
   });
 });
 

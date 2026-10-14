@@ -27,7 +27,7 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/index";
-import { llmTrialGrants, llmTrialKeys, llmTrialPools, trialGrants } from "../db/schema";
+import { llmTrialGrants, llmTrialKeys, llmTrialPools, llmTrialSettings, trialGrants } from "../db/schema";
 import { aesDecrypt, aesEncrypt, bytesToHex, getAesKey, packAesBlob, unpackAesBlob } from "../crypto/aes";
 import {
   ActivationError,
@@ -244,6 +244,40 @@ async function decryptApiKey(blob: string): Promise<string> {
   return aesDecrypt(getAesKey(), iv, dataHex);
 }
 
+// ─── Dashboard master switch ───────────────────────────────────────────────
+
+export const LLM_TRIAL_ENABLED_SETTING_KEY = "enabled";
+
+/**
+ * The dashboard master switch. **Absent = OFF**, so deploying this feature
+ * changes no behaviour until an operator turns it on, and turning it off again is
+ * one click rather than a redeploy.
+ *
+ * OFF stops *all* issuance — including machines that already hold a key, whose
+ * next request is answered `TRIAL_LLM_DISABLED` and which then fall back to the
+ * ordinary "configure your own service" path. Per-machine precision is what
+ * revoking one key or disabling one pool is for; this is the global stop.
+ */
+export async function readLlmTrialEnabled(db: Database): Promise<boolean> {
+  const row = await db
+    .select()
+    .from(llmTrialSettings)
+    .where(eq(llmTrialSettings.key, LLM_TRIAL_ENABLED_SETTING_KEY))
+    .get();
+  return row?.value === "true";
+}
+
+export async function writeLlmTrialEnabled(db: Database, enabled: boolean): Promise<void> {
+  const value = enabled ? "true" : "false";
+  await db
+    .insert(llmTrialSettings)
+    .values({ key: LLM_TRIAL_ENABLED_SETTING_KEY, value, updatedAt: nowISO() })
+    .onConflictDoUpdate({
+      target: llmTrialSettings.key,
+      set: { value, updatedAt: nowISO() },
+    });
+}
+
 // ─── DB-backed operations ─────────────────────────────────────────────────
 
 async function hasActiveTrial(
@@ -347,6 +381,13 @@ export async function issueTrialLlmProfile(
   }
 ): Promise<TrialLlmProfileResponse> {
   if (!config.trialLlmEnabled) {
+    throw new ActivationError("TRIAL_LLM_DISABLED", "试用额度暂未开放", 403);
+  }
+
+  // Checked BEFORE the idempotent return on purpose: a global stop that left
+  // already-issued machines running would not be a stop. The client treats this
+  // code as terminal and silently falls back to the config-wall path.
+  if (!(await readLlmTrialEnabled(db))) {
     throw new ActivationError("TRIAL_LLM_DISABLED", "试用额度暂未开放", 403);
   }
 

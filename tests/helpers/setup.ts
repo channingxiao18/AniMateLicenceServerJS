@@ -375,6 +375,12 @@ CREATE TABLE IF NOT EXISTS llm_trial_grants (
 );
 CREATE INDEX IF NOT EXISTS llm_trial_grants_fingerprint_idx ON llm_trial_grants (fingerprint_hash);
 CREATE INDEX IF NOT EXISTS llm_trial_grants_key_idx ON llm_trial_grants (key_id);
+
+CREATE TABLE IF NOT EXISTS llm_trial_settings (
+  key text PRIMARY KEY NOT NULL,
+  value text NOT NULL,
+  updated_at text DEFAULT (datetime('now')) NOT NULL
+);
 `;
 
 export function createTestDb(): { sqlite: Database.Database; db: AppDb } {

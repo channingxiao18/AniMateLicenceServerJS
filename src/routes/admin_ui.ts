@@ -21,7 +21,7 @@ import {
 } from "../services/activation";
 import { formatPlanFeatures } from "../services/plan_features";
 import { readCatalogCardEnabled } from "../services/catalog";
-import { listLlmTrialKeys, listLlmTrialPools } from "../services/llm_trial";
+import { listLlmTrialKeys, listLlmTrialPools, readLlmTrialEnabled } from "../services/llm_trial";
 import { listTrialGrants } from "../services/trial";
 import { listFeedback } from "../services/feedback";
 import {
@@ -445,6 +445,7 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
   router.get("/llm-trial", async (c) => {
     const pools = await listLlmTrialPools(db);
     const keys = await listLlmTrialKeys(db);
+    const masterEnabled = await readLlmTrialEnabled(db);
 
     const poolOptions = pools
       .map(
@@ -512,11 +513,14 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
       "批量添加"
     );
 
+    const poolTable = `<div class="table-card"><div class="table-caption"><div><h2>额度池</h2><p>base_url / model / 有效期都挂在池上，换模型或换网关只要加一条池记录，客户端无需发版。</p></div></div><div class="table-scroll"><table><thead><tr><th>池</th><th>状态</th><th>产品</th><th>LLM</th><th>有效期</th><th>可用 key</th><th title="还没有任何机器引用的 key 数量">未使用</th><th>已引用机器</th><th>操作</th></tr></thead><tbody>${poolRows || `<tr><td colspan="9" class="muted">暂无额度池</td></tr>`}</tbody></table></div></div>`;
+    const keyTable = `<div class="table-card"><div class="table-caption"><div><h2>池内 key</h2><p>「被引用」是撤销前必须看的影响面：一把 key 服务多台机器。</p></div><span class="muted">共 ${keys.length} 把</span></div><div class="table-scroll"><table><thead><tr><th>Key ID</th><th>尾号</th><th>所属池</th><th>状态</th><th>被引用</th><th>创建时间</th><th>撤销时间</th><th>备注</th><th>操作</th></tr></thead><tbody>${keyRows || `<tr><td colspan="9" class="muted">池里还没有 key</td></tr>`}</tbody></table></div></div>`;
+
     return c.html(
       shell(
         "试用额度",
         "/admin/llm-trial",
-        `${flash(c)}<div class="toolbar"><div class="muted">试用期内的机器通过 <code>POST /v1/llm/trial-profile</code> 领取这里的一把 key。分配顺序：优先取<b>还没有机器引用</b>的 key，同级取创建时间最新的。「未使用」长期为 0 就是该补池了。<br>停用池只挡新签发；撤销 key 会打断所有引用它的机器（撤销后不会自动改签）。改池的<b>有效期即可救回</b>被判过期的机器。key 只显示尾 4 位，完整值只在创建时写入（加密）且不回显。</div><div class="actions"><a class="btn primary" href="#create-llm-pool">新建池</a><a class="btn" href="#create-llm-key">添加 key</a><a class="btn" href="#create-llm-keys-bulk">批量添加 key</a></div></div><div class="table-card"><div class="table-caption"><div><h2>额度池</h2><p>base_url / model / 有效期都挂在池上，换模型或换网关只要加一条池记录，客户端无需发版。</p></div></div><div class="table-scroll"><table><thead><tr><th>池</th><th>状态</th><th>产品</th><th>LLM</th><th>有效期</th><th>可用 key</th><th title="还没有任何机器引用的 key 数量">未使用</th><th>已引用机器</th><th>操作</th></tr></thead><tbody>${poolRows || `<tr><td colspan="9" class="muted">暂无额度池</td></tr>`}</tbody></table></div></div><div class="table-card"><div class="table-caption"><div><h2>池内 key</h2><p>「被引用」是撤销前必须看的影响面：一把 key 服务多台机器。</p></div><span class="muted">共 ${keys.length} 把</span></div><div class="table-scroll"><table><thead><tr><th>Key ID</th><th>尾号</th><th>所属池</th><th>状态</th><th>被引用</th><th>创建时间</th><th>撤销时间</th><th>备注</th><th>操作</th></tr></thead><tbody>${keyRows || `<tr><td colspan="9" class="muted">池里还没有 key</td></tr>`}</tbody></table></div></div>${createPoolModal}${createKeyModal}${bulkKeyModal}${editPoolModals}`
+        `${flash(c)}<div class="card"><h3>总开关</h3><div class="actions" style="align-items:center"><form class="inline-form" method="post" action="/admin/api/llm-trial/enabled"><input type="hidden" name="enabled" value="${masterEnabled ? "false" : "true"}"><label class="switch" title="${masterEnabled ? "点击关停" : "点击启用"}"><input type="checkbox" ${masterEnabled ? "checked" : ""} onchange="this.form.submit()"><span class="slider"></span></label></form><span class="badge ${masterEnabled ? "ok" : "muted"}">${masterEnabled ? "已启用" : "已关停（默认）"}</span></div><span class="muted">默认关停。关停时<b>连已签发的机器也停</b>：客户端下次请求会拿到 <code>TRIAL_LLM_DISABLED</code>，然后静默回落到既有的"配置自己的 AI 服务"路径，不阻断应用。要做到只挡新签发、不影响已签发的机器，请改用池的「停用」；要精准打断某几台机器，请「撤销」它们引用的 key。<br>服务端环境变量 <code>TRIAL_LLM_ENABLED</code> 是另一道闸门（默认 false），两者必须都开着才会签发。</span></div><div class="toolbar"><div class="muted">试用期内的机器通过 <code>POST /v1/llm/trial-profile</code> 领取这里的一把 key。分配顺序：优先取<b>还没有机器引用</b>的 key，同级取创建时间最新的。「未使用」长期为 0 就是该补池了。<br>停用池只挡新签发；撤销 key 会打断所有引用它的机器（撤销后不会自动改签）。改池的<b>有效期即可救回</b>被判过期的机器。key 只显示尾 4 位，完整值只在创建时写入（加密）且不回显。</div><div class="actions"><a class="btn primary" href="#create-llm-pool">新建池</a><a class="btn" href="#create-llm-key">添加 key</a><a class="btn" href="#create-llm-keys-bulk">批量添加 key</a></div></div>${poolTable}${keyTable}${createPoolModal}${createKeyModal}${bulkKeyModal}${editPoolModals}`
       )
     );
   });

@@ -26,18 +26,22 @@ import {
   setProviderMappingActive,
   updatePlan,
   updateProduct,
+  writeAuditLog,
 } from "../services/activation";
 import { parsePlanFeatures } from "../services/plan_features";
 import { readCatalogCardEnabled, writeCatalogCardEnabled } from "../services/catalog";
 import {
+  LLM_TRIAL_ENABLED_SETTING_KEY,
   createLlmTrialKey,
   createLlmTrialKeys,
   createLlmTrialPool,
   listLlmTrialKeys,
   listLlmTrialPools,
+  readLlmTrialEnabled,
   revokeLlmTrialKey,
   setLlmTrialPoolStatus,
   updateLlmTrialPool,
+  writeLlmTrialEnabled,
 } from "../services/llm_trial";
 import { readCommunityInfo, writeCommunityInfo } from "../services/community";
 import { deleteTrialGrant } from "../services/trial";
@@ -425,6 +429,42 @@ export function createAdminApiRouter(db: Database, _config: AppConfig, registry:
       }
       const enabled = raw === true || raw === "true" || raw === "1";
       await writeCatalogCardEnabled(db, enabled);
+      return okOrRedirect(c, { status: "ok", enabled });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  // Global master switch. Absent = OFF, so this feature is inert on deploy until
+  // an operator flips it here — and an emergency stop needs no redeploy.
+  router.get("/llm-trial/enabled", async (c) => {
+    return c.json({ enabled: await readLlmTrialEnabled(db) });
+  });
+
+  router.post("/llm-trial/enabled", async (c) => {
+    try {
+      const body = await readBody(c);
+      const raw = body.enabled;
+      if (
+        raw !== true &&
+        raw !== "true" &&
+        raw !== "1" &&
+        raw !== false &&
+        raw !== "false" &&
+        raw !== "0"
+      ) {
+        return c.json({ error: "INVALID_REQUEST", message: "enabled 取值无效" }, 400);
+      }
+      const enabled = raw === true || raw === "true" || raw === "1";
+      await writeLlmTrialEnabled(db, enabled);
+      await writeAuditLog(db, {
+        action: enabled ? "llm_trial_enable" : "llm_trial_disable",
+        targetType: "llm_trial_setting",
+        targetId: LLM_TRIAL_ENABLED_SETTING_KEY,
+        actor: "admin",
+        ipAddress: ip(c),
+        after: { enabled },
+      });
       return okOrRedirect(c, { status: "ok", enabled });
     } catch (err) {
       return errorResponse(c, err);
