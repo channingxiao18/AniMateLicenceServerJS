@@ -405,6 +405,29 @@ describe("trial licence grants", () => {
     expect(byInstallId.total).toBe(1);
     expect(byInstallId.items[0].id).toBe(grant!.id);
 
+    // 列上不再套 lower()（它会废掉 install_id 索引，实测单次读 23 万行），
+    // 大小写不敏感靠「原词 + 小写词」两次索引等值查找保住：库存大写时也必须命中。
+    const upperInstallId = "install-id-stored-upper";
+    await env.db.insert(telemetryEvents).values({
+      eventId: "evt-search-test-2",
+      schemaVersion: 1,
+      event: "app_launch",
+      sourceId: "desktop_prod",
+      receivedAtUnix: Math.floor(Date.now() / 1000),
+      productId: "animate",
+      machineHash: grant!.telemetryMachineHash!,
+      installId: upperInstallId.toUpperCase(),
+      payloadJson: "{}",
+      rawJson: "{}",
+    });
+    const byUpperInstallId = await listTrialGrants(env.db, env.config, {
+      page: 1,
+      pageSize: 20,
+      search: upperInstallId,
+    });
+    expect(byUpperInstallId.total).toBe(1);
+    expect(byUpperInstallId.items[0].id).toBe(grant!.id);
+
     // An install id with no telemetry rows matches nothing.
     const unknownInstall = await listTrialGrants(env.db, env.config, {
       page: 1,

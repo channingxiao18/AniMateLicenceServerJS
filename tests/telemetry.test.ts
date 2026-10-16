@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestEnv } from "./helpers/setup";
 import {
@@ -8,14 +8,17 @@ import {
   getRetentionReport,
   getStartupDiagnostics,
   getTelemetryInstallDetail,
+  getTelemetryMachineUsage,
   getTelemetryReport,
   listActiveDevicesForDay,
   listInstallationsForDay,
+  listTelemetryUsers,
   recordTelemetryEvent,
   TelemetryError,
 } from "../src/services/telemetry";
 import {
   telemetryDailyMetrics,
+  telemetryDailyUniques,
   telemetryEvents,
   telemetrySessionState,
 } from "../src/db/schema";
@@ -554,7 +557,9 @@ describe("telemetry unclean session reporting", () => {
     const rows = await env.db.select().from(telemetryEvents).all();
     expect(rows.filter((row) => row.event === "session_unclean_end")).toHaveLength(1);
 
-    const detail = await getTelemetryInstallDetail(env.db, { installId });
+    // 详情页默认只看最近 30 天；这条用例的数据固定在 2026-08-15，所以显式要全历史，
+    // 否则窗口会把事件滤掉（窗口行为本身由下面的 "install detail window" 用例覆盖）。
+    const detail = await getTelemetryInstallDetail(env.db, { installId, days: "all" });
     expect(detail.uncleanExits).toBe(1);
     expect(detail.cleanExits).toBe(0);
     expect(detail.activeSecs).toBe(1800);
@@ -708,5 +713,237 @@ describe("telemetry storage honesty + language picker events", () => {
     const listed = await listActiveDevicesForDay(env.db, { day, productId: "animate" });
     expect(listed.total).toBe(1);
     expect(listed.items[0].installId).toBe(installId);
+  });
+});
+
+describe("telemetry daily-unique marks (read-quota rewrite)", () => {
+  it("falls back to the raw replay while install_active has no coverage", async () => {
+    const env = await createTestEnv();
+    const day = new Date().toISOString().slice(0, 10);
+    // 直接插原始事件 = 「回填还没跑」的状态：install_active 一行都没有。
+    // 这时活跃设备页必须回退到原始事件重放，而不是给出一张全 0 的报表。
+    await env.db.insert(telemetryEvents).values({
+      eventId: "bbbbbbbb-0000-4000-8000-000000000001",
+      schemaVersion: 2,
+      event: "session_start",
+      sourceId: "desktop_prod",
+      receivedAt: `${day} 10:00:00`,
+      receivedAtUnix: Math.floor(Date.parse(`${day}T10:00:00Z`) / 1000),
+      sentAt: Math.floor(Date.parse(`${day}T10:00:00Z`) / 1000),
+      productId: "animate",
+      appVersion: "0.12.5",
+      platform: "windows",
+      channel: "official",
+      machineHash: "d".repeat(64),
+      installId: "cccccccc-0000-4000-8000-000000000001",
+      sessionId: "dddddddd-0000-4000-8000-000000000001",
+      licenseState: "free",
+      payloadJson: JSON.stringify({ started_at: Math.floor(Date.parse(`${day}T10:00:00Z`) / 1000) }),
+      rawJson: "{}",
+    });
+
+    const report = await getActivityDays(env.db, { days: 7, productId: "animate" });
+    expect(report.days.find((row) => row.day === day)).toMatchObject({ devices: 1, launches: 1 });
+    expect(await env.db.select().from(telemetryDailyUniques).all()).toHaveLength(0);
+  });
+
+  it("writes machine_active, session_seen and install_active in one ingest pass", async () => {
+    const env = await createTestEnv();
+    const now = new Date();
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", event(), now);
+
+    const marks = await env.db.select().from(telemetryDailyUniques).all();
+    expect(marks.map((row) => row.uniqueType).sort()).toEqual([
+      "install_active",
+      "machine_active",
+      "session_seen",
+    ]);
+    const day = now.toISOString().slice(0, 10);
+    for (const mark of marks) {
+      expect(mark.day).toBe(day);
+      expect(mark.productId).toBe("animate");
+    }
+    expect(marks.find((row) => row.uniqueType === "install_active")!.uniqueValue).toBe(
+      "22222222-2222-4222-8222-222222222222"
+    );
+  });
+});
+
+describe("install detail window (read-quota rewrite)", () => {
+  const installId = "99999999-9999-4999-8999-999999999999";
+  const sessionId = "88888888-8888-4888-8888-888888888888";
+
+  async function seed(env: Awaited<ReturnType<typeof createTestEnv>>) {
+    const old = new Date(Date.now() - 60 * 86400000);
+    const recent = new Date(Date.now() - 3600_000);
+    const base = {
+      schema_version: 2 as const,
+      product_id: "animate",
+      app_version: "0.12.5",
+      platform: "win32",
+      channel: "official",
+      machine_hash: "c".repeat(64),
+      install_id: installId,
+      session_id: sessionId,
+      license_state: "free",
+      payload: {},
+    };
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "aaaabbbb-0000-4000-8000-000000000001",
+      event: "session_start",
+      payload: { started_at: Math.floor(old.getTime() / 1000) },
+    }, old);
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "aaaabbbb-0000-4000-8000-000000000002",
+      event: "session_start",
+      payload: { started_at: Math.floor(recent.getTime() / 1000) },
+    }, recent);
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      ...base,
+      event_id: "aaaabbbb-0000-4000-8000-000000000003",
+      event: "surface_event",
+      payload: { surface: "workshop", action: "open" },
+    }, recent);
+  }
+
+  it("defaults to 30 days, honours days=all and filters in SQL", async () => {
+    const env = await createTestEnv();
+    await seed(env);
+
+    const recentOnly = await getTelemetryInstallDetail(env.db, { installId });
+    expect(recentOnly.days).toBe(30);
+    expect(recentOnly.totalEvents).toBe(2);
+    expect(recentOnly.launches).toBe(1);
+    expect(recentOnly.workshopOpens).toBe(1);
+    expect(recentOnly.platform).toBe("windows");
+
+    const allHistory = await getTelemetryInstallDetail(env.db, { installId, days: "all" });
+    expect(allHistory.days).toBe("all");
+    expect(allHistory.totalEvents).toBe(3);
+    expect(allHistory.launches).toBe(2);
+
+    // event / session_id / surface 三种筛选都由 SQL 完成（含 json_extract 的 surface）。
+    const byEvent = await getTelemetryInstallDetail(env.db, { installId, days: "all", event: "session_start" });
+    expect(byEvent.totalFilteredEvents).toBe(2);
+    expect(byEvent.events).toHaveLength(2);
+    const bySession = await getTelemetryInstallDetail(env.db, { installId, days: "all", sessionId });
+    expect(bySession.totalFilteredEvents).toBe(3);
+    const bySurface = await getTelemetryInstallDetail(env.db, { installId, days: "all", surface: "workshop" });
+    expect(bySurface.totalFilteredEvents).toBe(1);
+    expect(bySurface.events[0].event).toBe("surface_event");
+    const byMissingSurface = await getTelemetryInstallDetail(env.db, { installId, days: "all", surface: "dance_studio" });
+    expect(byMissingSurface.totalFilteredEvents).toBe(0);
+  });
+
+  it("pages in SQL instead of slicing a full in-memory scan", async () => {
+    const env = await createTestEnv();
+    await seed(env);
+    const page = await getTelemetryInstallDetail(env.db, { installId, days: "all", page: 2, pageSize: 2 });
+    expect(page.totalFilteredEvents).toBe(3);
+    expect(page.events).toHaveLength(1);
+  });
+});
+
+describe("duration scope contract (single SESSION_DURATION_EVENTS)", () => {
+  const installId = "eeeeeeee-0000-4000-8000-000000000001";
+  const machine = "e".repeat(64);
+  const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  // 固定到当天 12:00 UTC：让所有事件落在同一个 UTC 日，且不与页面的时间窗边界打架。
+  const base = (() => {
+    const d = new Date();
+    d.setUTCHours(12, 0, 0, 0);
+    return d.getTime();
+  })();
+  const at = (secs: number) => new Date(base + secs * 1000);
+  const today = new Date(base).toISOString().slice(0, 10);
+  const todayRow = (report: { days: Array<Record<string, unknown>> }) =>
+    report.days.find((row) => row.day === today);
+
+  async function send(
+    env: Awaited<ReturnType<typeof createTestEnv>>,
+    event: string,
+    sessionId: string,
+    eventId: string,
+    payload: Record<string, unknown>,
+    secs: number
+  ) {
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", {
+      schema_version: 2,
+      event_id: eventId,
+      event,
+      sent_at: Math.floor(at(secs).getTime() / 1000),
+      product_id: "animate",
+      app_version: "0.12.5",
+      platform: "win32",
+      channel: "official",
+      machine_hash: machine,
+      install_id: installId,
+      session_id: sessionId,
+      license_state: "free",
+      payload,
+    }, at(secs));
+  }
+
+  it("reports the same activeSecs in every consumer, including tails that end on a checkpoint", async () => {
+    const env = await createTestEnv();
+    // 会话 A：最后一个时长事件是 checkpoint（旧的三事件口径会丢掉这段尾巴）
+    const a = uuid(101);
+    await send(env, "session_start", a, uuid(1), { started_at: Math.floor(base / 1000) }, 0);
+    await send(env, "session_checkpoint", a, uuid(2), { seq: 1, process_duration_secs: 600, companion_visible_secs: 360 }, 600);
+    // 会话 B：以 unclean_end 收尾
+    const b = uuid(102);
+    await send(env, "session_start", b, uuid(3), { started_at: Math.floor(base / 1000) }, 0);
+    await send(env, "session_heartbeat", b, uuid(4), { seq: 1, process_duration_secs: 300, companion_visible_secs: 200 }, 300);
+    await send(env, "session_unclean_end", b, uuid(5), { process_duration_secs: 900, companion_visible_secs: 600 }, 900);
+    // 会话 C：干净退出
+    const c = uuid(103);
+    await send(env, "session_start", c, uuid(6), { started_at: Math.floor(base / 1000) }, 0);
+    await send(env, "session_heartbeat", c, uuid(7), { seq: 1, process_duration_secs: 300, companion_visible_secs: 200 }, 300);
+    await send(env, "session_end", c, uuid(8), { process_duration_secs: 1200, companion_visible_secs: 800 }, 1200);
+
+    // 600 (A) + 300→900 (B) + 300→1200 (C) = 2700；三个口径必须都给出这个数。
+    const activity = await getActivityDays(env.db, { days: 2, productId: "animate" });
+    expect(todayRow(activity)).toMatchObject({ devices: 1, launches: 3, activeSecs: 2700 });
+
+    const usage = await getTelemetryMachineUsage(env.db, { days: 2, productId: "animate" });
+    expect(usage[0].activeSecs).toBe(2700);
+
+    const detail = await getTelemetryInstallDetail(env.db, { installId, days: "all" });
+    expect(detail.activeSecs).toBe(2700);
+    expect(detail.launches).toBe(3);
+
+    const users = await listTelemetryUsers(env.db, { days: 2, productId: "animate" });
+    expect(users.items[0].activeSecs).toBe(2700);
+
+    // 入库聚合（设备总览卡片/每日趋势的数据源）也必须一致
+    const report = await getTelemetryReport(env.db, { days: 2, productId: "animate" });
+    expect(report.totals.activeSecs).toBe(2700);
+  });
+
+  it("keeps session_unclean_detected out of the duration scope (and warns once)", async () => {
+    const env = await createTestEnv();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sessionId = uuid(201);
+    await send(env, "session_start", sessionId, uuid(11), { started_at: Math.floor(base / 1000) }, 0);
+    await send(env, "session_heartbeat", sessionId, uuid(12), { seq: 1, process_duration_secs: 600, companion_visible_secs: 400 }, 600);
+    // 带时长字段的 detection 事件：今天刻意不算时长（口径由 SESSION_DURATION_EVENTS 决定），
+    // 但它仍然算「异常退出」并让当天设备保持活跃。
+    await send(env, "session_unclean_detected", sessionId, uuid(13), { process_duration_secs: 900, companion_visible_secs: 700 }, 900);
+
+    const detail = await getTelemetryInstallDetail(env.db, { installId, days: "all" });
+    expect(detail.activeSecs).toBe(600);
+    expect(detail.uncleanExits).toBe(1);
+
+    const usage = await getTelemetryMachineUsage(env.db, { days: 2, productId: "animate" });
+    expect(usage[0].activeSecs).toBe(600);
+
+    const activity = await getActivityDays(env.db, { days: 2, productId: "animate" });
+    expect(todayRow(activity)).toMatchObject({ devices: 1, activeSecs: 600 });
+
+    // 探针：第一次收到带时长的 session_unclean_detected 时告警（每个 isolate 一次）。
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
   });
 });

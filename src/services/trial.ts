@@ -2,7 +2,7 @@
  * One-time trial licence grants.
  */
 
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/index";
 import { activationLogs, activations, plans, products, telemetryEvents, trialGrants } from "../db/schema";
@@ -464,12 +464,19 @@ export async function listTrialGrants(
     // Install ids only exist on telemetry rows. Resolve a pasted install id to
     // the machine hashes reported by that install, then match grants through
     // telemetry_machine_hash (the same value the client sends as machine_hash).
+    //
+    // 列上不能套 lower()：install_id 入库就是客户端原样发来的 UUID（生产全库
+    // 实测 0 行与 lower() 不同），而 (install_id, received_at) 是唯一能命中
+    // 等值查找的索引；套上 lower() 后规划器只能整表扫 machine_idx —— 实测单次
+    // 读 23 万行 / 29 秒。这里用「原词 + 小写 + 大写」三个索引等值查找保住原来的
+    // 大小写不敏感（最多 3 次索引探测，仍然只读命中的那几行）。
+    const installIdTerms = Array.from(new Set([term, term.toLowerCase(), term.toUpperCase()]));
     const installMachineHashes = new Set(
       (
         await db
           .selectDistinct({ machineHash: telemetryEvents.machineHash })
           .from(telemetryEvents)
-          .where(sql`lower(${telemetryEvents.installId}) = ${term.toLowerCase()}`)
+          .where(inArray(telemetryEvents.installId, installIdTerms))
           .all()
       )
         .map((row) => row.machineHash)
