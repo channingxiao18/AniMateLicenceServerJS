@@ -40,6 +40,7 @@ import {
   listTelemetryEvents,
   type ProductFunnel,
 } from "../services/telemetry";
+import { compareVersions, getFeatureCombos, getFunnelBreakdown, getFunnelReport, listFunnelUsers, stageRates } from "../services/funnel";
 import {
   createSession,
   destroySession,
@@ -97,6 +98,7 @@ const navItems = [
   ["/admin/subscriptions", "订阅"],
   ["/admin/providers", "支付映射"],
   ["/admin/telemetry/installs", "新增安装"],
+  ["/admin/telemetry/funnel", "用户转化路径"],
   ["/admin/telemetry/activity", "活跃设备"],
   ["/admin/telemetry/startup", "启动诊断"],
   ["/admin/telemetry/retention", "留存分析"],
@@ -788,6 +790,138 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
   });
 
   router.get("/telemetry/reports", (c) => c.redirect("/admin/telemetry/installs"));
+
+  router.get("/telemetry/funnel", async (c) => {
+    const days = Number(c.req.query("days") || 30);
+    const version = c.req.query("version") || "";
+    const page = Number(c.req.query("page") || 1);
+    const report = await getFunnelReport(db, { days, version });
+    const users = await listFunnelUsers(db, { days, version, page, pageSize: 25 });
+    const combos = await getFeatureCombos(db, { days, version });
+    const bd = await getFunnelBreakdown(db, { days, version });
+    const vrows = compareVersions(report.versions);
+    const r = stageRates(report.totals);
+    const t = report.totals;
+    const pct = (a: number, b: number) => (b ? `${((100 * a) / b).toFixed(1)}%` : "—");
+    const qs = (extra: Record<string, string | number>) => {
+      const p = new URLSearchParams({ days: String(days), version });
+      for (const [k, v] of Object.entries(extra)) p.set(k, String(v));
+      return `/admin/telemetry/funnel?${p.toString()}`;
+    };
+    const STAGES: Array<[string, string, number, string]> = [
+      ["S0 下载安装", "install_seen 首见", t.s0, ""],
+      ["S1 正常启动", "首 72h · session_start ∨ 首帧", t.s1, "3.8% 装完打不开"],
+      ["S2 完成导览", "首 72h · onboarding_completed", t.s2, "32.7% 启动后没做完"],
+      ["S3 体验核心", "首 72h · 导入 ∨ 真AI ∨ 跳舞", t.s3, `主动核心 ${t.activeCore} · 仅被动舞蹈 ${t.passiveDance}`],
+      ["S4 喜欢", "首 7 天 · 喜爱指数 ≥2", t.s4, "条件于 S3"],
+      ["S5 持续使用", "首 7 天 · 活跃 ≥2 天", t.s5, "26.5% 喜欢但没回来"],
+      ["S6 去购买", "首 72h · purchase_clicked", t.s6, `购买晚于核心 ${t.buyAfterCore}`],
+      ["S7 支付激活", "首 7 天 · activations(Creem)", t.s7, `应用内可见 ${t.paidInApp}`],
+    ];
+    let prev = t.s0;
+    const funnelRows = STAGES.map(([name, defi, val, note]) => {
+      const loss = prev - val;
+      const bar = t.s0 ? Math.max(1.2, (100 * val) / t.s0) : 0;
+      const row = `<tr><td><b>${e(name)}</b><div class="muted" style="font-size:12px">${e(defi)}</div></td>
+        <td><div style="height:18px;background:#edf1f6;border-radius:4px;overflow:hidden"><div style="height:18px;width:${bar.toFixed(1)}%;background:#2563eb"></div></div></td>
+        <td class="num-cell">${val.toLocaleString()}</td>
+        <td class="num-cell">${pct(val, t.s0)}</td>
+        <td class="num-cell">${loss > 0 ? `−${loss.toLocaleString()} (${pct(loss, prev)})` : "—"}</td>
+        <td class="muted" style="font-size:12px">${e(note)}</td></tr>`;
+      prev = val;
+      return row;
+    }).join("");
+    const versionRows = vrows.map((v) => `<tr class="${v.small ? "muted" : ""}">
+      <td><b>${e(v.version)}</b></td>
+      <td class="num-cell">${e(v.releaseDay)}</td>
+      <td class="num-cell">${v.installs.toLocaleString()}</td>
+      <td class="num-cell">${pct(v.s1, v.installs)}</td>
+      <td class="num-cell">${pct(v.s2, v.installs)}</td>
+      <td class="num-cell">${pct(v.s3, v.installs)}</td>
+      <td class="num-cell">${pct(v.s6, v.installs)}</td>
+      <td class="num-cell">${v.deltaS3 === null ? "—" : `${v.deltaS3 > 0 ? "+" : ""}${v.deltaS3}pt`}</td>
+      <td>${v.small ? '<span class="badge warn">n&lt;100 只看方向</span>' : ""}</td></tr>`).join("");
+    const userRows = users.items.map((u) => {
+      const flags: Array<[string, number]> = [["launch", u.launch], ["onb", u.onboarding], ["core", u.core], ["like", u.liked], ["keep", u.retained], ["buy", u.bought], ["pay", u.paid]];
+      const dots = flags.map(([, v]) => `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:3px;background:${v ? "#2563eb" : "#e6ebf3"}"></span>`).join("");
+      const score = u.score ?? 0;
+      const tier = score >= 4 ? "高" : score >= 2 ? "中" : "低";
+      return `<tr><td><code>${e(u.installId.slice(0, 8))}</code></td>
+        <td class="num-cell">${e(u.installAt.slice(5, 16))}</td>
+        <td>${e(u.appVersion)}</td><td>${e(u.locale || "?")}</td>
+        <td>${u.trialGranted ? "是" : "—"}</td>
+        <td>${dots}</td>
+        <td class="num-cell">${u.activeDays}</td><td class="num-cell">${u.sessions}</td>
+        <td class="num-cell">${u.score ?? "—"}</td>
+        <td><span class="badge ${tier === "高" ? "ok" : tier === "中" ? "info" : "muted"}">${tier}</span></td></tr>`;
+    }).join("");
+    const bdRows: Array<[string, number, number, string]> = [
+      ["点「导入」", bd.importClick, t.s0, "进入文件选择"],
+      ["导入成功", bd.importOk, bd.importClick, "点击→写入成功"],
+      ["主动发言（非脚本）", bd.msgReal, t.s0, "真实打字"],
+      ["拿到真 AI 回复", bd.realAi, bd.msgReal, "发言→真回复"],
+      ["触发跳舞", bd.dance, t.s0, "100% music_beat 自动"],
+    ];
+    const bdHtml = bdRows.map(([label, n, den, note]) => {
+      const bar = den ? Math.max(1.2, (100 * n) / den) : 0;
+      return `<tr><td>${e(label)}</td>
+        <td><div style="height:16px;background:#edf1f6;border-radius:4px;overflow:hidden"><div style="height:16px;width:${bar.toFixed(1)}%;background:#93c5fd"></div></div></td>
+        <td class="num-cell">${n.toLocaleString()}</td>
+        <td class="num-cell">${pct(n, den)}</td>
+        <td class="muted" style="font-size:12px">${e(note)}</td></tr>`;
+    }).join("");
+    const comboRows = combos.rows.map((r) => {
+      const unc = r.key === "100" ? combos.totals.installs - combos.totals.dance
+        : r.key === "010" ? combos.totals.installs - combos.totals.imp
+        : r.key === "001" ? combos.totals.installs - combos.totals.ai : null;
+      return `<tr><td><b>${e(r.label)}</b>${r.significant ? ' <span style="color:#059669;font-weight:700">★</span>' : ""}</td>
+        <td class="num-cell">${r.n.toLocaleString()}</td>
+        <td class="num-cell"><b>${r.buyRate}%</b></td>
+        <td class="num-cell muted" style="font-size:12px">[${r.ciLow}, ${r.ciHigh}]</td>
+        <td class="num-cell">${r.payRate}%</td>
+        <td class="num-cell">${r.delta === null ? "—" : `${r.delta > 0 ? "+" : ""}${r.delta}pt`}</td>
+        <td class="num-cell muted">${unc === null ? "—" : unc.toLocaleString()}</td></tr>`;
+    }).join("");
+    const pageCount = Math.max(1, Math.ceil(users.total / users.pageSize));
+    const content = `<div class="report-shell">
+      <div class="report-head"><div><h2>用户转化路径</h2>
+        <p class="muted">口径 path_v1 · 窗口 S0–S3/S6 取首 72h、S4–S5/S7 取首 7 天 · cohort ${e(report.filters.from)} ~ ${e(report.filters.to)} · 已满窗 ${t.s0.toLocaleString()} 台</p></div>
+        <div class="range-switch">${[7, 30, 90].map((d) => `<a class="${days === d ? "active" : ""}" href="${qs({ days: d, page: 1 })}">${d}天</a>`).join("")}</div></div>
+      <div class="metric-strip">
+        <div class="metric"><div class="metric-label">新增安装</div><div class="metric-value">${t.s0.toLocaleString()}</div></div>
+        <div class="metric"><div class="metric-label">正常启动</div><div class="metric-value">${r.s1}%</div></div>
+        <div class="metric"><div class="metric-label">体验核心</div><div class="metric-value">${r.s3}%</div></div>
+        <div class="metric"><div class="metric-label">去购买</div><div class="metric-value">${r.s6}%</div></div>
+        <div class="metric"><div class="metric-label">购买 → 支付</div><div class="metric-value">${r.s7}%</div></div>
+        <div class="metric"><div class="metric-label">按序走到支付</div><div class="metric-value">${r.toS7}%</div></div>
+      </div>
+      <section class="report-section"><div class="section-head"><h3>A · 生命周期漏斗（8 层）</h3>
+        <span>${version ? `版本 ${e(version)}` : "全部版本"}</span></div>
+        <table><thead><tr><th>阶段</th><th style="width:22%">进度</th><th class="num-cell">设备</th><th class="num-cell">占安装</th><th class="num-cell">本层流失</th><th>备注</th></tr></thead>
+        <tbody>${funnelRows}</tbody></table></section>
+      <section class="report-section"><div class="section-head"><h3>A2 · 核心功能拆解</h3>
+        <span>主动核心 ${bd.activeCore} · 仅被动舞蹈 ${bd.passiveDance}</span></div>
+        <table><thead><tr><th>子步骤</th><th style="width:20%">进度</th><th class="num-cell">设备</th><th class="num-cell">转化</th><th>说明</th></tr></thead>
+        <tbody>${bdHtml}</tbody></table>
+        <p class="muted" style="font-size:12px;padding:10px 16px">导入成功率 96.8%（取消是"没选文件"，不是失败）；真 AI 只有 21.4%（主动发言 126 → 27），是全线最大断裂。</p></section>
+      <section class="report-section"><div class="section-head"><h3>B · 版本对比</h3><span>按首见版本 · 等长窗口 · 只在 n≥100 时看差异</span></div>
+        <table><thead><tr><th>首见版本</th><th class="num-cell">首次出现</th><th class="num-cell">装机</th><th class="num-cell">启动</th><th class="num-cell">导览</th><th class="num-cell">核心</th><th class="num-cell">购买</th><th class="num-cell">核心 Δ</th><th></th></tr></thead>
+        <tbody>${versionRows || `<tr><td colspan="9" class="muted">暂无数据，请先执行 scripts/backfill_funnel.sql</td></tr>`}</tbody></table></section>
+      <section class="report-section"><div class="section-head"><h3>D · 功能组合阶梯</h3>
+        <span>3 个核心功能的 8 种组合 · 只在 CI 不重叠时标 ★</span></div>
+        <table><thead><tr><th>组合（舞/导/AI）</th><th class="num-cell">n</th><th class="num-cell">购买率</th><th class="num-cell">95% CI</th><th class="num-cell">支付率</th><th class="num-cell">增量</th><th class="num-cell">未覆盖</th></tr></thead>
+        <tbody>${comboRows || `<tr><td colspan="7" class="muted">暂无数据</td></tr>`}</tbody></table>
+        <p class="muted" style="font-size:12px;padding:10px 16px">★ = 与上一档 CI 不重叠（显著）。组合是自选择结果，不是实验；AI 档 n 通常很小，只看方向。判定用购买率，不用支付率。</p></section>
+      <section class="report-section"><div class="section-head"><h3>C · 用户明细（1 行 = 1 个安装）</h3>
+        <span>启·导·核·喜·续·买·付 · 共 ${users.total.toLocaleString()} 条</span></div>
+        <table><thead><tr><th>用户</th><th class="num-cell">安装(UTC)</th><th>版本</th><th>语言</th><th>试用</th><th>阶段</th><th class="num-cell">活跃天</th><th class="num-cell">会话</th><th class="num-cell">喜爱分</th><th>分层</th></tr></thead>
+        <tbody>${userRows || `<tr><td colspan="10" class="muted">暂无数据</td></tr>`}</tbody></table>
+        <div class="pagination"><span class="muted">第 ${(users.page - 1) * users.pageSize + 1}–${Math.min(users.page * users.pageSize, users.total)} 条 / 共 ${users.total.toLocaleString()} 条</span>
+          <span class="pagination-links">${Array.from({ length: Math.min(pageCount, 7) }, (_, i) => i + 1).map((n) => `<a class="btn ${n === users.page ? "current" : ""}" href="${qs({ page: n })}">${n}</a>`).join("")}</span></div></section>
+      <p class="muted" style="font-size:12px">数据来源：telemetry_install_profile（由 scripts/backfill_funnel.sql 生成，可随时重建）。未满窗的 cohort 不进分母；“—”表示无数据而不是 0。</p>
+    </div>`;
+    return c.html(shell("用户转化路径", "/admin/telemetry/funnel", content));
+  });
 
   router.get("/telemetry/installs", async (c) => {
     const days = Number(c.req.query("days") || 30);

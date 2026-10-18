@@ -55,3 +55,7 @@ CATALOG_R2_ENDPOINT = "https://efc49b431fd7c1b183fa8a45e7cbd06b.r2.cloudflaresto
 [[r2_buckets]]
 binding = "CATALOG"
 bucket_name = "animate-model-catalog"
+
+# Daily 03:10 UTC: recompute the last 7 days of funnel projection
+[triggers]
+crons = ["10 3 * * *"]

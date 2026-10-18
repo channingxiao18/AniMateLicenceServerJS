@@ -14,6 +14,7 @@ import { createV1Router } from "./routes/v1";
 import { createWebhookRouter } from "./routes/webhook";
 import { createCreemAdapter } from "./services/creem";
 import { createProviderRegistry } from "./services/provider";
+import { runFunnelBackfill } from "./services/funnel_jobs";
 
 export interface Env {
   DB: D1Database;
@@ -141,6 +142,15 @@ function addCors(response: Response): Response {
 }
 
 export default {
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      runFunnelBackfill(env, 7).then(
+        (r) => console.log(`[funnel] backfill ${r.from}~${r.to} ok (${r.statements} stmts)`),
+        (err) => console.error(`[funnel] backfill failed: ${err instanceof Error ? err.stack : String(err)}`),
+      ),
+    );
+  },
+
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
       if (request.method === "OPTIONS") {
