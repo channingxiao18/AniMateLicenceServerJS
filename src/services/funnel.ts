@@ -331,7 +331,7 @@ export async function getFeatureCombos(
     const buy = num(r.buy);
     const pay = num(r.pay);
     const [ciLow, ciHigh] = wilson(buy, n);
-    const label = [dance ? "舞" : "·", imp ? "导" : "·", ai ? "·AI" : "··"].join("");
+    const label = `舞${dance ? "✓" : "·"} 导${imp ? "✓" : "·"} AI${ai ? "✓" : "·"}`;
     return {
       key: `${dance}${imp}${ai}`, label: `${label}`,
       dance, imp, ai, n, buy, pay,
@@ -346,7 +346,8 @@ export async function getFeatureCombos(
 
   const base = rows.find((r) => r.key === "000");
   for (const r of rows) {
-    if (base && r.key !== "000") r.delta = Math.round((r.buyRate - base.buyRate) * 10) / 10;
+    // n<30 的档位（AI 组合）不参与 Δ：样本太小，差值没有意义
+    if (base && r.key !== "000" && r.n >= 30) r.delta = Math.round((r.buyRate - base.buyRate) * 10) / 10;
   }
   // 显著：与上一档（按 跳舞→+导入→+AI 的阶梯）CI 不重叠
   const order = ["000", "100", "010", "110", "111", "101", "011"];
@@ -355,7 +356,13 @@ export async function getFeatureCombos(
     const prev = rows.find((r) => r.key === order[idx - 1]);
     if (cur && prev) cur.significant = cur.ciLow > prev.ciHigh;
   }
-  rows.sort((x, y) => y.n - x.n);
+  // 阶梯顺序：功能数少的在前，同数量按购买率升序
+  rows.sort((x, y) => {
+    const fx = x.dance + x.imp + x.ai;
+    const fy = y.dance + y.imp + y.ai;
+    if (fx !== fy) return fx - fy;
+    return x.buyRate - y.buyRate;
+  });
 
   const totals = {
     dance: rows.filter((r) => r.dance).reduce((s, r) => s + r.n, 0),
