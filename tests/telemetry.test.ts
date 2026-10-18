@@ -8,10 +8,12 @@ import {
   getRetentionReport,
   getStartupDiagnostics,
   getTelemetryInstallDetail,
+  getTelemetryMachineDetail,
   getTelemetryMachineUsage,
   getTelemetryReport,
   listActiveDevicesForDay,
   listInstallationsForDay,
+  listTelemetryEvents,
   listTelemetryUsers,
   recordTelemetryEvent,
   TelemetryError,
@@ -920,6 +922,42 @@ describe("duration scope contract (single SESSION_DURATION_EVENTS)", () => {
     // 入库聚合（设备总览卡片/每日趋势的数据源）也必须一致
     const report = await getTelemetryReport(env.db, { days: 2, productId: "animate" });
     expect(report.totals.activeSecs).toBe(2700);
+
+    // 活跃设备-某日页的「历史累计时长」改读 telemetry_session_state 聚合（migration 0017）。
+    // 它必须与上面四个消费方给出同一个数：每个会话的 last_* 之和 = 该会话的累计增量。
+    const dayDevices = await listActiveDevicesForDay(env.db, {
+      day: today,
+      page: 1,
+      pageSize: 10,
+    });
+    expect(dayDevices.items).toHaveLength(1);
+    expect(dayDevices.items[0]).toMatchObject({
+      installId,
+      lifetimeActiveSecs: 2700,
+      lifetimeOverlayVisibleSecs: 1760, // 360 (A) + 600 (B) + 800 (C)
+    });
+
+    // 用户详情页：默认 30 天窗口 + SQL 分页，摘要与上面的口径一致。
+    const machineDetail = await getTelemetryMachineDetail(env.db, {
+      machineHash: machine,
+      productId: "animate",
+      days: 2,
+      page: 1,
+      pageSize: 2,
+    });
+    expect(machineDetail.user).toMatchObject({ machineHash: machine, events: 8, launches: 3, activeSecs: 2700 });
+    expect(machineDetail.days).toBe(2);
+    expect(machineDetail.total).toBe(8);
+    expect(machineDetail.events).toHaveLength(2);
+    const nextPage = await getTelemetryMachineDetail(env.db, {
+      machineHash: machine,
+      productId: "animate",
+      days: 2,
+      page: 2,
+      pageSize: 2,
+    });
+    expect(nextPage.events).toHaveLength(2);
+    expect(nextPage.events[0].eventId).not.toBe(machineDetail.events[0].eventId);
   });
 
   it("keeps session_unclean_detected out of the duration scope (and warns once)", async () => {
@@ -945,5 +983,34 @@ describe("duration scope contract (single SESSION_DURATION_EVENTS)", () => {
     // 探针：第一次收到带时长的 session_unclean_detected 时告警（每个 isolate 一次）。
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
+  });
+});
+
+describe("raw event browser id lookup", () => {
+  it("matches a full hash / UUID exactly, and still matches fragments", async () => {
+    const env = await createTestEnv();
+    await recordTelemetryEvent(env.db, env.config, "animate-desktop-prod-v1", event());
+
+    // 完整 64 位 hash → 走 machine_idx 等值
+    const fullHash = await listTelemetryEvents(env.db, { machineHash, days: 7 });
+    expect(fullHash.total).toBe(1);
+    // 片段 → 仍是两侧通配 LIKE（语义不变）
+    const fragment = await listTelemetryEvents(env.db, { machineHash: machineHash.slice(0, 8), days: 7 });
+    expect(fragment.total).toBe(1);
+    // 完整 UUID → 走 install_idx 等值
+    const byInstall = await listTelemetryEvents(env.db, {
+      installId: "22222222-2222-4222-8222-222222222222",
+      days: 7,
+    });
+    expect(byInstall.total).toBe(1);
+    // 大小写不敏感仍然成立
+    const upper = await listTelemetryEvents(env.db, {
+      installId: "22222222-2222-4222-8222-222222222222".toUpperCase(),
+      days: 7,
+    });
+    expect(upper.total).toBe(1);
+    // 不存在的完整 hash → 0 行（而不是退化成全表 LIKE）
+    const missing = await listTelemetryEvents(env.db, { machineHash: "f".repeat(64), days: 7 });
+    expect(missing.total).toBe(0);
   });
 });

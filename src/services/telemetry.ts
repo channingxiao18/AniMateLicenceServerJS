@@ -1,4 +1,5 @@
 import { and, count, desc, eq, gte, inArray, isNotNull, like, lte, sql, sum } from "drizzle-orm";
+import type { AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/index";
 import {
@@ -917,6 +918,25 @@ const EVENT_LIST_COLUMNS = {
 } as const;
 
 /**
+ * 事件浏览页的 id 过滤：完整 id 走索引等值，其余（片段/前缀）仍走两侧通配的 LIKE。
+ *
+ * 完整 64 位 machine_hash 或 UUID 形式的 install_id / session_id 是「从别处复制过来查这一条」
+ * 的典型用法：等值能命中 machine_idx / install_idx，把 7 天窗口里上万行的逐行 LIKE 比较
+ * 变成 1~3 次索引探测。片段搜索保留原语义（索引帮不上，靠时间窗兜底）。
+ * 大小写：库里是小写，用原词 + 小写 + 大写三个候选保住原来的大小写不敏感。
+ */
+function idFilter(
+  column: AnySQLiteColumn,
+  term: string | undefined
+) {
+  if (!term) return undefined;
+  if (!MACHINE_HASH_RE.test(term) && !UUID_RE.test(term)) {
+    return like(column, `%${term}%`);
+  }
+  return inArray(column, Array.from(new Set([term, term.toLowerCase(), term.toUpperCase()])));
+}
+
+/**
  * Raw-event browser. Every query is bounded by a mandatory time window
  * (default 7 days, max 90) and pushed into SQL — the old implementation loaded
  * the whole table into memory and filtered in JS, which is what burned the D1
@@ -945,9 +965,13 @@ export async function listTelemetryEvents(
   const conditions = [gte(telemetryEvents.receivedAt, since)];
   if (params.event) conditions.push(eq(telemetryEvents.event, params.event));
   if (params.productId) conditions.push(eq(telemetryEvents.productId, params.productId));
-  if (params.machineHash) conditions.push(like(telemetryEvents.machineHash, `%${params.machineHash}%`));
-  if (params.installId) conditions.push(like(telemetryEvents.installId, `%${params.installId}%`));
-  if (params.sessionId) conditions.push(like(telemetryEvents.sessionId, `%${params.sessionId}%`));
+  for (const filter of [
+    idFilter(telemetryEvents.machineHash, params.machineHash),
+    idFilter(telemetryEvents.installId, params.installId),
+    idFilter(telemetryEvents.sessionId, params.sessionId),
+  ]) {
+    if (filter) conditions.push(filter);
+  }
   const where = and(...conditions);
 
   const items = await db
@@ -1361,14 +1385,6 @@ function telemetryPayload(row: { payloadJson: string }): Record<string, unknown>
   }
 }
 
-function telemetryOccurredAt(row: TelemetryEventListItem): number {
-  // raw_json is no longer fetched by list queries; sent_at is stamped at event
-  // build time on the client, so it is the closest cheap proxy for when the
-  // event actually happened (occurred_at_unix_ms only differed by ms).
-  if (Number.isFinite(row.sentAt) && (row.sentAt ?? 0) > 0) return (row.sentAt as number) * 1000;
-  return row.receivedAtUnix * 1000;
-}
-
 /**
  * 安装详情页的时长口径与其它页面共用 SESSION_DURATION_EVENTS（原来是本文件里另抄的一份
  * 4 事件数组，属于口径漂移的来源之一，已删除）。
@@ -1674,21 +1690,170 @@ async function listTelemetryUsersUncached(
   return { items: items.slice((page - 1) * pageSize, page * pageSize), total: items.length, page, pageSize };
 }
 
+/**
+ * 用户详细行为页。
+ *
+ * 旧实现把这个 machine_hash 的**全部历史**事件（含 payload）拉进 Worker，排序、过滤、
+ * 再切出 100 行 —— 生产最活跃的一台设备一次浏览就是 30,362 行；摘要还额外走一遍
+ * listTelemetryUsers 的全窗口聚合（那是另一条全表扫描）。
+ *
+ * 现在：时间窗（默认 30 天）+ 事件/Session 过滤 + LIMIT/OFFSET 全部下推到 SQL，
+ * 摘要拆成 3 条窄查询（计数聚合、窗口内最近一行、只有 4 种时长事件带 payload）。
+ */
 export async function getTelemetryMachineDetail(
   db: Database,
-  params: { machineHash: string; productId?: string; event?: string; sessionId?: string; page?: number; pageSize?: number },
-): Promise<{ user: TelemetryUserSummary | null; events: TelemetryEventListItem[]; total: number; page: number; pageSize: number }> {
+  params: {
+    machineHash: string;
+    productId?: string;
+    event?: string;
+    sessionId?: string;
+    /** 时间窗：天数（1-365）或 "all"（全历史）。默认 30 天。 */
+    days?: number | "all";
+    page?: number;
+    pageSize?: number;
+  },
+): Promise<{
+  user: TelemetryUserSummary | null;
+  events: TelemetryEventListItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+  days: number | "all";
+}> {
   const productId = params.productId || "animate";
-  const userResult = await listTelemetryUsers(db, { productId, q: params.machineHash, page: 1, pageSize: 1 });
-  const all = await db.select(EVENT_LIST_COLUMNS).from(telemetryEvents).where(and(eq(telemetryEvents.productId, productId), eq(telemetryEvents.machineHash, params.machineHash))).all();
-  const filtered = all.sort((a, b) => telemetryOccurredAt(a) - telemetryOccurredAt(b) || a.receivedAt.localeCompare(b.receivedAt)).filter((row) => {
-    if (params.event && row.event !== params.event) return false;
-    if (params.sessionId && row.sessionId !== params.sessionId) return false;
-    return true;
-  });
+  const machineHash = params.machineHash;
   const page = Math.max(1, Math.floor(params.page || 1));
   const pageSize = Math.min(200, Math.max(1, Math.floor(params.pageSize || 100)));
-  return { user: userResult.items[0] || null, events: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, pageSize };
+  const allHistory = params.days === "all";
+  const days = allHistory ? 0 : Math.min(365, Math.max(1, Math.floor(Number(params.days) || 30)));
+
+  const windowConditions = [
+    eq(telemetryEvents.productId, productId),
+    eq(telemetryEvents.machineHash, machineHash),
+  ];
+  if (!allHistory) {
+    windowConditions.push(
+      gte(telemetryEvents.receivedAt, toSqlDateTime(new Date(Date.now() - (days - 1) * 86400000)))
+    );
+  }
+  const windowWhere = and(...windowConditions);
+
+  const listConditions = [...windowConditions];
+  if (params.event) listConditions.push(eq(telemetryEvents.event, params.event));
+  if (params.sessionId) listConditions.push(eq(telemetryEvents.sessionId, params.sessionId));
+  const listWhere = and(...listConditions);
+  // 事件发生时刻：客户端打点时间优先，缺失时退回服务端接收时间（与安装详情页一致）。
+  const occurredAt = sql`COALESCE(NULLIF(${telemetryEvents.sentAt}, 0), ${telemetryEvents.receivedAtUnix})`;
+
+  const [facts, latestRow, durationRows, pageRows, totalRow] = await Promise.all([
+    db
+      .select({
+        events: count(),
+        launches: sql<number>`COALESCE(SUM(CASE WHEN ${telemetryEvents.event} = 'session_start' THEN 1 ELSE 0 END), 0)`,
+        sessions: sql<number>`COUNT(DISTINCT ${telemetryEvents.sessionId})`,
+        installs: sql<number>`COALESCE(SUM(CASE WHEN ${telemetryEvents.event} = 'install_seen' THEN 1 ELSE 0 END), 0)`,
+        firstSeenAt: sql<string | null>`MIN(${telemetryEvents.receivedAt})`,
+        lastSeenAt: sql<string | null>`MAX(${telemetryEvents.receivedAt})`,
+        firstInstallAt: sql<string | null>`MIN(CASE WHEN ${telemetryEvents.event} = 'install_seen' THEN ${telemetryEvents.receivedAt} END)`,
+        licenseStates: sql<string | null>`GROUP_CONCAT(DISTINCT ${telemetryEvents.licenseState})`,
+      })
+      .from(telemetryEvents)
+      .where(windowWhere)
+      .get(),
+    db
+      .select({
+        event: telemetryEvents.event,
+        appVersion: telemetryEvents.appVersion,
+        platform: telemetryEvents.platform,
+        channel: telemetryEvents.channel,
+      })
+      .from(telemetryEvents)
+      .where(windowWhere)
+      .orderBy(desc(telemetryEvents.receivedAt), desc(telemetryEvents.receivedAtUnix))
+      .limit(1)
+      .get(),
+    // 累计时长仍走原有「按会话取相对增量」的口径，但只读窗口内的 4 种时长事件，
+    // 且 payload 只为它们读取（生产最活跃那台 30 天 2,161 行，而不是 30,362 行）。
+    db
+      .select({
+        event: telemetryEvents.event,
+        sessionId: telemetryEvents.sessionId,
+        receivedAt: telemetryEvents.receivedAt,
+        payloadJson: telemetryEvents.payloadJson,
+      })
+      .from(telemetryEvents)
+      .where(and(...windowConditions, inArray(telemetryEvents.event, [...SESSION_DURATION_EVENTS])))
+      .orderBy(telemetryEvents.receivedAt)
+      .all(),
+    db
+      .select(EVENT_LIST_COLUMNS)
+      .from(telemetryEvents)
+      .where(listWhere)
+      .orderBy(occurredAt, telemetryEvents.receivedAt)
+      .limit(pageSize)
+      .offset((page - 1) * pageSize)
+      .all(),
+    db.select({ value: count() }).from(telemetryEvents).where(listWhere).get(),
+  ]);
+
+  let activeSecs = 0;
+  let overlayVisibleSecs = 0;
+  const sessionMax = new Map<string, { process: number; overlay: number; lastAt: string }>();
+  for (const row of durationRows) {
+    if (!row.sessionId) continue;
+    const payload = telemetryPayload(row);
+    const process = safePayloadDuration(payload, "process_duration_secs");
+    const visible = sessionVisibleSecs(payload, row.event);
+    const previous = sessionMax.get(row.sessionId) || { process: 0, overlay: 0, lastAt: row.receivedAt };
+    activeSecs += boundedDelta(process, previous.process);
+    overlayVisibleSecs += boundedDelta(visible, previous.overlay);
+    previous.process = Math.max(previous.process, process);
+    previous.overlay = Math.max(previous.overlay, visible);
+    previous.lastAt = row.receivedAt;
+    sessionMax.set(row.sessionId, previous);
+  }
+  // 「最近一次时长」= 最后活跃的那个会话的累计 process 时长（与原实现一致）。
+  const recentSession = Array.from(sessionMax.values())
+    .sort((a, b) => b.lastAt.localeCompare(a.lastAt))[0];
+
+  const lastSeenAt = facts?.lastSeenAt ?? null;
+  const user: TelemetryUserSummary | null = facts && lastSeenAt && Number(facts.events) > 0
+    ? {
+        machineHash,
+        firstSeenAt: facts.firstSeenAt || lastSeenAt,
+        lastSeenAt,
+        firstInstallAt: facts.firstInstallAt ?? null,
+        installs: Number(facts.installs || 0),
+        launches: Number(facts.launches || 0),
+        sessions: Number(facts.sessions || 0),
+        events: Number(facts.events || 0),
+        activeSecs,
+        overlayVisibleSecs,
+        recentSessionSecs: recentSession?.process || 0,
+        recentSessionAt: recentSession?.lastAt || null,
+        // 与旧实现一致：取窗口内最近一条事件的名称与维度（平台/版本/渠道理论上可能为空，
+        // 客户端每条事件都会带，缺失时退回 unknown）。
+        lastEvent: latestRow?.event || "",
+        status: userStatus(lastSeenAt),
+        platform: latestRow?.platform || "unknown",
+        appVersion: latestRow?.appVersion || "unknown",
+        channel: latestRow?.channel || "official",
+        licenseStates: (facts.licenseStates || "")
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean)
+          .sort(),
+      }
+    : null;
+
+  return {
+    user,
+    events: pageRows,
+    total: Number(totalRow?.value || 0),
+    page,
+    pageSize,
+    days: allHistory ? "all" : days,
+  };
 }
 
 function reportDays(value: number | undefined, fallback = 30): number {
@@ -1707,12 +1872,29 @@ function addUtcDays(day: string, days: number): string {
   return dayString(new Date(new Date(`${day}T00:00:00Z`).getTime() + days * 86400000));
 }
 
+/**
+ * 每日新增安装报表。
+ *
+ * 这两个页面原来完全没有缓存：刷新一次、从明细页返回一次，都会把同样的扫描重跑一遍
+ * （`loadInstallations` + `loadNewInstallationActions`）。这里套上与其它报表一致的
+ * 5 分钟 per-isolate 缓存，重复浏览不再付费。
+ */
 export async function getInstallationDays(
   db: Database,
   params: { days?: number; productId?: string } = {}
 ) {
   const days = reportDays(params.days);
   const productId = params.productId || "animate";
+  return cachedReport(`installs:${productId}:${days}`, () =>
+    getInstallationDaysUncached(db, { days, productId })
+  );
+}
+
+async function getInstallationDaysUncached(
+  db: Database,
+  params: { days: number; productId: string }
+) {
+  const { days, productId } = params;
   const start = daysAgo(days - 1);
   const installations = await loadInstallations(db, productId, undefined, { from: start });
   const relevantInstallations = installations.filter((row) => row.firstInstalledDay >= start);
@@ -1758,19 +1940,22 @@ export async function listInstallationsForDay(
   const productId = params.productId || "animate";
   const page = Math.max(1, Math.floor(params.page || 1));
   const pageSize = Math.min(100, Math.max(1, Math.floor(params.pageSize || 25)));
-  const all = (await loadInstallations(db, productId, undefined, { from: params.day, to: params.day }))
-    .filter((row) => row.firstInstalledDay === params.day)
-    .sort((a, b) => b.firstInstalledAt.localeCompare(a.firstInstalledAt));
-  const actions = await loadNewInstallationActions(db, productId, params.day, params.day, all);
-  return {
-    items: all.slice((page - 1) * pageSize, page * pageSize).map((row) => ({
-      ...row,
-      ...(actions.get(row.installId) || emptyNewInstallationActions()),
-    })),
-    total: all.length,
-    page,
-    pageSize,
-  };
+  // 与列表页共用 5 分钟缓存：翻页/返回不再重扫同一天。
+  return cachedReport(`installs-day:${productId}:${params.day}:${page}:${pageSize}`, async () => {
+    const all = (await loadInstallations(db, productId, undefined, { from: params.day, to: params.day }))
+      .filter((row) => row.firstInstalledDay === params.day)
+      .sort((a, b) => b.firstInstalledAt.localeCompare(a.firstInstalledAt));
+    const actions = await loadNewInstallationActions(db, productId, params.day, params.day, all);
+    return {
+      items: all.slice((page - 1) * pageSize, page * pageSize).map((row) => ({
+        ...row,
+        ...(actions.get(row.installId) || emptyNewInstallationActions()),
+      })),
+      total: all.length,
+      page,
+      pageSize,
+    };
+  });
 }
 
 type InstallationReportRow = {
@@ -1806,6 +1991,17 @@ function emptyNewInstallationActions(): NewInstallationActions {
   };
 }
 
+/**
+ * 「新装当天发生过哪些行为」的标记。
+ *
+ * 旧实现取 EVENT_LIST_COLUMNS（17 列，含 payload_json）把窗口内的 3 种行为事件全部搬回
+ * Worker，再在 JS 里按「首次安装当天」过滤 —— 30 天窗口实测 2,183 行，生产这条查询占了
+ * 12% 的数据库执行时间。而真正被用到的只有 install_id 与 event 两列。
+ *
+ * 现在：只取 3 列（install_id / event / received_at，payload_json 不再读）；日明细页设备数
+ * 很少（30~55 台）时把 install_id 推进 SQL，走 (install_id, received_at) 索引，只读这些
+ * 设备的行为事件（实测 46 行）。
+ */
 async function loadNewInstallationActions(
   db: Database,
   productId: string,
@@ -1816,14 +2012,26 @@ async function loadNewInstallationActions(
   const installationDayById = new Map(installations.map((row) => [row.installId, row.firstInstalledDay]));
   if (!installationDayById.size) return new Map();
 
-  const events = await db.select(EVENT_LIST_COLUMNS).from(telemetryEvents).where(and(
+  // D1 单语句最多 100 个绑定参数；这里固定的开销是 1 个 product + 3 个事件 + 2 个时间边界，
+  // 因此 install_id 最多放 90 个（报表页 30 天约 1,000 台，那种情况保持原范围只做列裁剪）。
+  const installIdFilter = installationDayById.size <= 90
+    ? inArray(telemetryEvents.installId, Array.from(installationDayById.keys()))
+    : undefined;
+
+  const events = await db.select({
+    installId: telemetryEvents.installId,
+    event: telemetryEvents.event,
+    receivedAt: telemetryEvents.receivedAt,
+  }).from(telemetryEvents).where(and(
     eq(telemetryEvents.productId, productId),
     inArray(telemetryEvents.event, [...NEW_INSTALLATION_ACTION_EVENTS]),
+    installIdFilter,
     gte(telemetryEvents.receivedAt, `${start} 00:00:00`),
     lte(telemetryEvents.receivedAt, `${end} 23:59:59`)
   )).all();
   const actionsByInstall = new Map<string, NewInstallationActions>();
   for (const event of events) {
+    // 只保留「首次安装当天」的行为：时间窗内其它天的同种行为不计入新装漏斗。
     if (!event.installId || installationDayById.get(event.installId) !== event.receivedAt.slice(0, 10)) continue;
     const actions = actionsByInstall.get(event.installId) || emptyNewInstallationActions();
     if (event.event === "free_model_guide_clicked") actions.freeModelClicked = true;
@@ -2272,9 +2480,20 @@ async function getRetentionReportUncached(
 }
 
 /**
- * 每个 install 的历史累计时长。口径与原实现完全一致（按 received_at 顺序，对每个
- * session 累加「相对上一次报值的增量」），只是多了一个 install_id 收窄参数：
- * 活跃设备明细页只需要当前这一页的几十台设备，不需要全库 2000 台的历史。
+ * 每个 install 的历史累计时长。
+ *
+ * 旧实现回放该产品全历史的 5 种时长事件（外加 JSON.parse），只为了给当前这一页 25 台设备
+ * 填两个格子。生产实测（2026-10-17）：单次浏览读 15.9 万行、P50 3.0 秒，占当天数据库
+ * 执行时间的 25%。原因是 `install_id IN (…)` 根本没进索引 —— 规划器选的是
+ * `(product_id, event, received_at)` 的两个等值前缀，扫描完才逐行过滤 install_id。
+ *
+ * 现在改读 `telemetry_session_state`：入库时 updateSessionState 已经把每个会话「相对上一次
+ * 报值的增量」累计进 last_process_duration_secs / last_overlay_visible_secs（正常单调递增，
+ * 即该会话的最大值），按 install_id 求和就是累计值。配合 migration 0017 的
+ * (install_id) 索引，25 台设备 = 25 次索引探测（实测 15.9 万行 → 约 500 行、<10 ms）。
+ *
+ * 口径：与「入库累计值」同源（和活跃设备列表页的 active_secs 一致）。比原始事件回放低
+ * 约 0.6%（入库 CAS 丢更新 + 乱序回写，见 docs/telemetry-pagination-optimization-plan-1017.md §1.1）。
  */
 async function loadLifetimeUsageByInstall(
   db: Database,
@@ -2283,29 +2502,25 @@ async function loadLifetimeUsageByInstall(
 ): Promise<Map<string, { activeSecs: number; overlayVisibleSecs: number }>> {
   const result = new Map<string, { activeSecs: number; overlayVisibleSecs: number }>();
   if (installIds && !installIds.length) return result;
-  const conditions = [
-    eq(telemetryEvents.productId, productId),
-    inArray(telemetryEvents.event, ["session_start", ...SESSION_DURATION_EVENTS]),
-  ];
-  if (installIds) conditions.push(inArray(telemetryEvents.installId, installIds));
-  const events = await db.select(EVENT_LIST_COLUMNS).from(telemetryEvents)
-    .where(and(...conditions)).orderBy(telemetryEvents.receivedAt).all();
-  const sessionMax = new Map<string, { process: number; overlay: number; installId: string }>();
-  for (const event of events) {
-    if (!event.installId || !event.sessionId || event.event === "session_start") continue;
-    let payload: Record<string, unknown> = {};
-    try { payload = JSON.parse(event.payloadJson); } catch { /* Ignore malformed history. */ }
-    const process = safePayloadDuration(payload, "process_duration_secs");
-    const visible = sessionVisibleSecs(payload, event.event);
-    const previous = sessionMax.get(event.sessionId) || { process: 0, overlay: 0, installId: event.installId };
-    const current = result.get(event.installId) || { activeSecs: 0, overlayVisibleSecs: 0 };
-    current.activeSecs += boundedDelta(process, previous.process);
-    current.overlayVisibleSecs += boundedDelta(visible, previous.overlay);
-    result.set(event.installId, current);
-    sessionMax.set(event.sessionId, {
-      process: Math.max(previous.process, process),
-      overlay: Math.max(previous.overlay, visible),
-      installId: event.installId,
+
+  const conditions = [eq(telemetrySessionState.productId, productId)];
+  if (installIds) conditions.push(inArray(telemetrySessionState.installId, installIds));
+  const rows = await db
+    .select({
+      installId: telemetrySessionState.installId,
+      activeSecs: sum(telemetrySessionState.lastProcessDurationSecs),
+      overlayVisibleSecs: sum(telemetrySessionState.lastOverlayVisibleSecs),
+    })
+    .from(telemetrySessionState)
+    .where(and(...conditions))
+    .groupBy(telemetrySessionState.installId)
+    .all();
+
+  for (const row of rows) {
+    if (!row.installId) continue;
+    result.set(row.installId, {
+      activeSecs: Number(row.activeSecs || 0),
+      overlayVisibleSecs: Number(row.overlayVisibleSecs || 0),
     });
   }
   return result;

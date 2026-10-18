@@ -336,6 +336,34 @@ describe("trial licence grants", () => {
     ]);
   });
 
+  it("pages in SQL instead of loading every grant into memory", async () => {
+    const env = await createTestEnv();
+    for (const suffix of ["a", "b", "c"]) {
+      await startTrial(env.db, env.config, {
+        productId: "animate",
+        fingerprint: `trial-machine-paged-${suffix}`,
+        appVersion: "1.2.0",
+        platform: "windows",
+        ipAddress: "127.0.0.1",
+      });
+    }
+
+    const first = await listTrialGrants(env.db, env.config, { page: 1, pageSize: 2 });
+    expect(first.total).toBe(3);
+    expect(first.items).toHaveLength(2);
+    // 关联数据仍要补齐（products / plans 是批量读的，不是 N+1）
+    expect(first.items[0].product?.name).toBe("AniMate");
+
+    const last = await listTrialGrants(env.db, env.config, { page: 2, pageSize: 2 });
+    expect(last.total).toBe(3);
+    expect(last.items).toHaveLength(1);
+    expect(last.items[0].id).not.toBe(first.items[0].id);
+
+    // status / productId 过滤也下推到了 SQL
+    const expired = await listTrialGrants(env.db, env.config, { page: 1, pageSize: 10, status: "expired" });
+    expect(expired.total).toBe(0);
+  });
+
   it("searches trial grants by fingerprint hash, machine hash and install id", async () => {
     const env = await createTestEnv();
     const machineId = "search-machine-uuid-0001";

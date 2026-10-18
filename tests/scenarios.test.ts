@@ -30,6 +30,8 @@ import {
   adminExtendEntitlement,
   adminUnbindDevice,
   adminIncreaseDeviceCount,
+  listLicenses,
+  listActivationLogs,
 } from "../src/services/activation";
 import { processWebhook } from "../src/services/webhook";
 
@@ -1395,5 +1397,63 @@ describe("Scn: Batch license operations", () => {
   it("activation works again after batch reactivate", async () => {
     const r = await activate(env, keys[0], clientA.fingerprint);
     expect(r.licence).toBeTruthy();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Admin list pages — pagination must happen in SQL, not in the Worker
+// ═══════════════════════════════════════════════════════════════════════════
+describe("Admin list pagination", () => {
+  it("pages licences in SQL and still enriches the current page", async () => {
+    const env = await createTestEnv();
+    const keys = await batchCreateLicenses(env.db, {
+      count: 5,
+      planId: "animate-companion-lifetime-basic-v1",
+      notes: "paging",
+      batchId: "test-paging",
+      actor: "test",
+      ipAddress: "127.0.0.1",
+    });
+    expect(keys).toHaveLength(5);
+
+    const first = await listLicenses(env.db, { page: 1, pageSize: 2 });
+    expect(first.total).toBe(5);
+    expect(first.items).toHaveLength(2);
+    // 旧实现的「补齐关联对象」必须保留：entitlement / plan / product。
+    // 现在只是从「每行 3 条查询」变成「整页 3 条批量查询」。
+    expect(first.items[0].entitlement).not.toBeNull();
+    expect(first.items[0].plan?.planId).toBe("animate-companion-lifetime-basic-v1");
+    expect(first.items[0].product?.productId).toBe("animate");
+
+    const last = await listLicenses(env.db, { page: 3, pageSize: 2 });
+    expect(last.total).toBe(5);
+    expect(last.items).toHaveLength(1);
+    expect(last.items[0].licenseKey).not.toBe(first.items[0].licenseKey);
+
+    // 搜索仍然生效（license_key 片段，SQL 侧过滤）
+    const searched = await listLicenses(env.db, { page: 1, pageSize: 10, search: keys[0].slice(0, 8) });
+    expect(searched.items.map((row) => row.licenseKey)).toContain(keys[0]);
+
+    // 越界页：空列表 + 正确的 total（路由层负责回退到最后一页）
+    const beyond = await listLicenses(env.db, { page: 9, pageSize: 2 });
+    expect(beyond.items).toHaveLength(0);
+    expect(beyond.total).toBe(5);
+  });
+
+  it("pages activation logs in SQL", async () => {
+    const env = await createTestEnv();
+    const [key] = await batchCreateLicenses(env.db, {
+      count: 1,
+      planId: "animate-companion-lifetime-basic-v1",
+      notes: "paging-logs",
+      batchId: "test-paging-logs",
+      actor: "test",
+      ipAddress: "127.0.0.1",
+    });
+    await activate(env, key, clientA.fingerprint);
+
+    const page = await listActivationLogs(env.db, { page: 1, pageSize: 1 });
+    expect(page.total).toBeGreaterThan(0);
+    expect(page.items).toHaveLength(1);
   });
 });

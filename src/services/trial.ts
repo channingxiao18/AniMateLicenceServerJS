@@ -2,7 +2,7 @@
  * One-time trial licence grants.
  */
 
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, count, desc, eq, inArray } from "drizzle-orm";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/index";
 import { activationLogs, activations, plans, products, telemetryEvents, trialGrants } from "../db/schema";
@@ -429,14 +429,23 @@ export async function startTrial(
   return responseFromGrant(licence, grant, trialPlan, "TRIAL_STARTED");
 }
 
+/**
+ * 试用记录列表（后台 /admin/trials）。
+ *
+ * 旧实现无条件 `SELECT *` 整张 trial_grants（线上约 2,100 行、每天还在涨），
+ * 再在 JS 里过滤、切片。没有搜索时完全没必要：页面一次只渲染 80 行。
+ *
+ * 现在把排序/分页（以及 status / productId 过滤）下推到 SQL；只有真正输入搜索词时
+ * 才退回整表内存匹配 —— 那条路径要做多字段模糊匹配 + install_id 反查，
+ * 而且是一次显式的用户动作。
+ */
 export async function listTrialGrants(
   db: Database,
   config: AppConfig,
   params: { page?: number; pageSize?: number; status?: string; search?: string; productId?: string }
 ): Promise<{ items: Array<TrialGrant & { product: Product | null; plan: Plan | null }>; total: number }> {
-  const page = params.page || 1;
-  const pageSize = params.pageSize || 20;
-  const all = await db.select().from(trialGrants).orderBy(desc(trialGrants.createdAt)).all();
+  const page = Math.max(1, Math.floor(params.page || 1));
+  const pageSize = Math.min(200, Math.max(1, Math.floor(params.pageSize || 20)));
 
   // Products/plans are small dimension tables. Enrich from two full-table reads
   // instead of per-grant lookups: the N+1 pattern issues 2 D1 queries per grant,
@@ -447,12 +456,33 @@ export async function listTrialGrants(
   ]);
   const productById = new Map(productRows.map((p) => [p.productId, p]));
   const planById = new Map(planRows.map((p) => [p.planId, p]));
-
-  const enriched = all.map((grant) => ({
+  const enrich = (grant: TrialGrant) => ({
     ...grant,
     product: productById.get(grant.productId) || null,
     plan: grant.planId ? planById.get(grant.planId) || null : null,
-  }));
+  });
+
+  if (!params.search) {
+    const conditions = [];
+    if (params.status) conditions.push(eq(trialGrants.status, params.status));
+    if (params.productId) conditions.push(eq(trialGrants.productId, params.productId));
+    const where = conditions.length ? and(...conditions) : undefined;
+    const [rows, totalRow] = await Promise.all([
+      db
+        .select()
+        .from(trialGrants)
+        .where(where)
+        .orderBy(desc(trialGrants.createdAt))
+        .limit(pageSize)
+        .offset((page - 1) * pageSize)
+        .all(),
+      db.select({ value: count() }).from(trialGrants).where(where).get(),
+    ]);
+    return { items: rows.map(enrich), total: Number(totalRow?.value ?? 0) };
+  }
+
+  const all = await db.select().from(trialGrants).orderBy(desc(trialGrants.createdAt)).all();
+  const enriched = all.map(enrich);
 
   let filtered = enriched;
   if (params.status) filtered = filtered.filter((x) => x.status === params.status);

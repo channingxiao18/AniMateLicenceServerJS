@@ -2,7 +2,7 @@
  * Core business logic for product plans, licences, entitlements and devices.
  */
 
-import { and, desc, eq } from "drizzle-orm";
+import { and, count, desc, eq, inArray, like, or } from "drizzle-orm";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/index";
 import {
@@ -1712,44 +1712,84 @@ export async function listAuditLogs(db: Database) {
   return db.select().from(auditLogs).orderBy(desc(auditLogs.id)).limit(100).all();
 }
 
+/**
+ * 兑换码列表（后台 /admin/licenses）。
+ *
+ * 旧实现是两步全表 + N+1：先把**全部** licenses 读出来，再对每一行分别查
+ * entitlement / plan / product —— 3 条 D1 查询 × 行数。生产上打开一次这个页面
+ * 就是几百上千次串行往返（还会撞 Workers 的 subrequest 上限），这是「兑换码页
+ * 卡十几秒」的唯一原因。
+ *
+ * 现在：分页与过滤全部下推到 SQL（1 次 count + 1 次 LIMIT/OFFSET），
+ * 再用 3 条批量查询补齐当前页 30 行的关联数据 —— 与行数无关，固定 5 条查询。
+ */
 export async function listLicenses(
   db: Database,
   params: { page?: number; pageSize?: number; status?: string; search?: string; productId?: string }
 ): Promise<{ items: Array<License & { entitlement: Entitlement | null; plan: Plan | null; product: Product | null }>; total: number }> {
-  const page = params.page || 1;
-  const pageSize = params.pageSize || 20;
-  const all = await db.select().from(licenses).orderBy(desc(licenses.createdAt)).all();
+  const page = Math.max(1, Math.floor(params.page || 1));
+  const pageSize = Math.min(200, Math.max(1, Math.floor(params.pageSize || 20)));
 
-  const enriched = [];
-  for (const license of all) {
-    const entitlement = await db
-      .select()
-      .from(entitlements)
-      .where(eq(entitlements.id, license.entitlementId))
-      .get();
-    const plan = entitlement
-      ? await db.select().from(plans).where(eq(plans.planId, entitlement.planId)).get()
-      : null;
-    const product = entitlement
-      ? await db.select().from(products).where(eq(products.productId, entitlement.productId)).get()
-      : null;
-    enriched.push({ ...license, entitlement: entitlement || null, plan: plan || null, product: product || null });
-  }
-
-  let filtered = enriched;
-  if (params.status) filtered = filtered.filter((x) => x.status === params.status);
-  if (params.productId) filtered = filtered.filter((x) => x.entitlement?.productId === params.productId);
+  const conditions = [];
+  if (params.status) conditions.push(eq(licenses.status, params.status));
   if (params.search) {
-    const s = params.search.toUpperCase();
-    filtered = filtered.filter(
-      (x) =>
-        x.licenseKey.toUpperCase().includes(s) ||
-        (x.entitlement?.customerEmail || "").toUpperCase().includes(s)
-    );
+    // 原来对 license_key 与 customer_email 做「大小写不敏感的包含匹配」。email 在
+    // entitlements 上，用子查询把它拼进来（IN (SELECT …) 只占 1 个绑定参数，
+    // 不会因为命中过多而撞 D1 的 100 参数上限）。
+    const term = `%${params.search.trim()}%`;
+    const emailSubquery = db
+      .select({ id: entitlements.id })
+      .from(entitlements)
+      .where(like(entitlements.customerEmail, term));
+    conditions.push(or(like(licenses.licenseKey, term), inArray(licenses.entitlementId, emailSubquery)));
   }
+  if (params.productId) {
+    const productSubquery = db
+      .select({ id: entitlements.id })
+      .from(entitlements)
+      .where(eq(entitlements.productId, params.productId));
+    conditions.push(inArray(licenses.entitlementId, productSubquery));
+  }
+  const where = conditions.length ? and(...conditions) : undefined;
 
-  const total = filtered.length;
-  return { items: filtered.slice((page - 1) * pageSize, page * pageSize), total };
+  const [rows, totalRow] = await Promise.all([
+    db
+      .select()
+      .from(licenses)
+      .where(where)
+      .orderBy(desc(licenses.createdAt))
+      .limit(pageSize)
+      .offset((page - 1) * pageSize)
+      .all(),
+    db.select({ value: count() }).from(licenses).where(where).get(),
+  ]);
+
+  // 只为当前这一页补关联数据：3 条批量查询（products / plans 是小的维度表）。
+  const entitlementIds = Array.from(new Set(rows.map((row) => row.entitlementId)));
+  const entitlementRows = entitlementIds.length
+    ? await db.select().from(entitlements).where(inArray(entitlements.id, entitlementIds)).all()
+    : [];
+  const entitlementById = new Map(entitlementRows.map((row) => [row.id, row]));
+  const planIds = Array.from(new Set(entitlementRows.map((row) => row.planId)));
+  const productIds = Array.from(new Set(entitlementRows.map((row) => row.productId)));
+  const [planRows, productRows] = await Promise.all([
+    planIds.length ? db.select().from(plans).where(inArray(plans.planId, planIds)).all() : [],
+    productIds.length ? db.select().from(products).where(inArray(products.productId, productIds)).all() : [],
+  ]);
+  const planById = new Map(planRows.map((row) => [row.planId, row]));
+  const productById = new Map(productRows.map((row) => [row.productId, row]));
+
+  const items = rows.map((license) => {
+    const entitlement = entitlementById.get(license.entitlementId) || null;
+    return {
+      ...license,
+      entitlement,
+      plan: entitlement ? planById.get(entitlement.planId) || null : null,
+      product: entitlement ? productById.get(entitlement.productId) || null : null,
+    };
+  });
+
+  return { items, total: Number(totalRow?.value ?? 0) };
 }
 
 export const listOrders = listLicenses;
@@ -1782,13 +1822,21 @@ export async function listActivationLogs(
   db: Database,
   params: { page?: number; pageSize?: number }
 ): Promise<{ items: Array<typeof activationLogs.$inferSelect>; total: number }> {
-  const page = params.page || 1;
-  const pageSize = params.pageSize || 50;
-  const all = await db.select().from(activationLogs).orderBy(desc(activationLogs.id)).all();
-  return {
-    items: all.slice((page - 1) * pageSize, page * pageSize),
-    total: all.length,
-  };
+  const page = Math.max(1, Math.floor(params.page || 1));
+  const pageSize = Math.min(200, Math.max(1, Math.floor(params.pageSize || 50)));
+  // 与兑换码/试用页同样的毛病：原来把整张 activation_logs 读回来再 slice。
+  // 这条按 rowid 倒序，LIMIT/OFFSET 走主键即可，不需要额外索引。
+  const [items, totalRow] = await Promise.all([
+    db
+      .select()
+      .from(activationLogs)
+      .orderBy(desc(activationLogs.id))
+      .limit(pageSize)
+      .offset((page - 1) * pageSize)
+      .all(),
+    db.select({ value: count() }).from(activationLogs).get(),
+  ]);
+  return { items, total: Number(totalRow?.value ?? 0) };
 }
 
 // ─── Feature #1: increase device count ──────────────────────────────────────

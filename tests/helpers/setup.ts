@@ -84,6 +84,8 @@ CREATE TABLE IF NOT EXISTS licenses (
   created_at text DEFAULT (datetime('now')) NOT NULL,
   used_at text
 );
+-- migration 0017：兑换码列表按 created_at 倒序分页。
+CREATE INDEX IF NOT EXISTS licenses_created_idx ON licenses (created_at);
 
 CREATE TABLE IF NOT EXISTS activations (
   id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -191,6 +193,10 @@ CREATE TABLE IF NOT EXISTS trial_grants (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS trial_grants_product_feature_fingerprint_unique ON trial_grants (product_id, feature, fingerprint_hash);
 CREATE INDEX IF NOT EXISTS trial_grants_product_fingerprint_idx ON trial_grants (product_id, fingerprint_hash);
+-- migration 0017：catalog 资格 / 试用 LLM 签发只按 fingerprint_hash + status 查，
+-- 上面两个以 product_id 打头的索引用不上，缺了它就会全表扫描。
+CREATE INDEX IF NOT EXISTS trial_grants_fingerprint_status_idx ON trial_grants (fingerprint_hash, status);
+CREATE INDEX IF NOT EXISTS trial_grants_created_idx ON trial_grants (created_at);
 
 CREATE TABLE IF NOT EXISTS telemetry_events (
   event_id text PRIMARY KEY NOT NULL,
@@ -235,6 +241,8 @@ CREATE TABLE IF NOT EXISTS telemetry_session_state (
   last_overlay_visible_secs integer DEFAULT 0 NOT NULL,
   updated_at text DEFAULT (datetime('now')) NOT NULL
 );
+-- migration 0017：活跃设备-某日页按 install_id 聚合历史累计时长。
+CREATE INDEX IF NOT EXISTS telemetry_session_state_install_idx ON telemetry_session_state (install_id);
 
 CREATE TABLE IF NOT EXISTS telemetry_daily_metrics (
   day text NOT NULL,

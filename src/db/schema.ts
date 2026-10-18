@@ -77,21 +77,29 @@ export const entitlements = sqliteTable("entitlements", {
 });
 
 // Licences are the codes users type into the client.
-export const licenses = sqliteTable("licenses", {
-  licenseKey: text("license_key").primaryKey(),
-  entitlementId: integer("entitlement_id")
-    .notNull()
-    .unique()
-    .references(() => entitlements.id),
-  status: text("status").notNull().default("unused"),
-  channel: text("channel").notNull().default("manual"),
-  batchId: text("batch_id"),
-  notes: text("notes"),
-  externalInstanceId: text("external_instance_id"),
-  externalProviderKey: text("external_provider_key"),
-  createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
-  usedAt: text("used_at"),
-});
+export const licenses = sqliteTable(
+  "licenses",
+  {
+    licenseKey: text("license_key").primaryKey(),
+    entitlementId: integer("entitlement_id")
+      .notNull()
+      .unique()
+      .references(() => entitlements.id),
+    status: text("status").notNull().default("unused"),
+    channel: text("channel").notNull().default("manual"),
+    batchId: text("batch_id"),
+    notes: text("notes"),
+    externalInstanceId: text("external_instance_id"),
+    externalProviderKey: text("external_provider_key"),
+    createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+    usedAt: text("used_at"),
+  },
+  (table) => ({
+    // 后台兑换码列表按 created_at 倒序分页（migration 0017）。没有它每次打开页面
+    // 都是「扫全表 + 临时排序」。licenses 只在生成兑换码时整批写入，索引成本可忽略。
+    createdIdx: index("licenses_created_idx").on(table.createdAt),
+  })
+);
 
 // Backwards-compatible export name for code that still talks about orders.
 export const orders = licenses;
@@ -236,6 +244,16 @@ export const trialGrants = sqliteTable(
       table.productId,
       table.fingerprintHash
     ),
+    // 「这台机器有没有有效试用」是 catalog 资格检查与试用 LLM 签发的前置判断，两处都只按
+    // fingerprint_hash + status 查、不带 product_id —— 上面两个以 product_id 打头的索引
+    // 一个都用不上，只能全表扫描。见 migration 0017。写入只发生在「发放试用 / 转 expired」，
+    // 日增几十行，索引维护成本可忽略。
+    fingerprintStatusIdx: index("trial_grants_fingerprint_status_idx").on(
+      table.fingerprintHash,
+      table.status
+    ),
+    // 后台试用列表按 created_at 倒序分页（migration 0017），否则每次打开都是全表 + 排序。
+    createdIdx: index("trial_grants_created_idx").on(table.createdAt),
   })
 );
 
@@ -293,11 +311,17 @@ export const telemetrySessionState = sqliteTable(
     lastProcessDurationSecs: integer("last_process_duration_secs").notNull().default(0),
     lastOverlayVisibleSecs: integer("last_overlay_visible_secs").notNull().default(0),
     updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
-  }
-  // 这里原本还有 telemetry_session_state_machine_idx (machine_hash, updated_at)，
-  // 已由 migration 0016 删除：没有任何查询按 machine_hash 访问这张表，而该索引第二列
-  // 是 updated_at —— 每次心跳 UPSERT 都会改它，等于每次心跳都删+插一条索引项。
-  // 不要加回来。
+  },
+  (table) => ({
+    // 活跃设备-某日页按 install_id 聚合「历史累计时长」（见 migration 0017）。
+    // 只含 install_id：心跳 UPDATE 只改 last_* / updated_at 这些未被索引的列，
+    // SQLite 不会重写索引项，因此对写入零放大（已用 EXPLAIN opcode + journal 字节验证）。
+    installIdx: index("telemetry_session_state_install_idx").on(table.installId),
+    // 注意：不要加回 telemetry_session_state_machine_idx (machine_hash, updated_at)。
+    // 它已由 migration 0016 删除：第二列 updated_at 每次心跳都变，等于每次心跳都要
+    // 删掉并重插一条索引项，纯写放大。要按 machine_hash 查就只能建只含 machine_hash
+    // 的索引（第一列不变 → 不重写索引项）。
+  })
 );
 
 export const telemetryDailyMetrics = sqliteTable(
