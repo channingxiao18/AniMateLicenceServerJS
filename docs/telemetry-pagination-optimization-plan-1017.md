@@ -482,3 +482,19 @@ for (const license of all) {
   摘要里的「累计活跃时长」也随之标注为「近 N 天」。
 - **P1（用户总览 / 机器用量聚合下推）与 P2（`telemetry_install_daily` 日聚合表）本轮没做** ——
   P1 只降传输/耗时、不降 `rows_read`，P2 才是读额度的彻底解法，建议观察一周后再定。
+
+### 9.6 上线记录（2026-10-18 执行完毕）
+
+| 步骤 | 结果 |
+|---|---|
+| 提交 | `bf4b3e1 perf(admin): 后台列表分页下推 + 去掉兑换码页 N+1 + 4 个读索引` |
+| 迁移前计数 | `licenses` 101 / `trial_grants` 2,187 / `telemetry_session_state` 15,304 / `telemetry_events` 324,357 |
+| 迁移 | `d1 migrations apply --remote` → `0017` ✅，**5 条命令 / 132 ms**（四条 CREATE INDEX + 记录版本行） |
+| 迁移后计数 | `licenses` 101 / `trial_grants` 2,187 / `telemetry_session_state` 15,304 / `telemetry_events` 324,358（+1 是期间实时上报，非迁移） |
+| 新索引核对 | `licenses_created_idx`、`telemetry_session_state_install_idx`、`trial_grants_created_idx`、`trial_grants_fingerprint_status_idx` 全部存在 |
+| 部署 | `npm run deploy` → Version ID `71fd1c9d-729c-48cd-a54c-fb673786900e`，Startup 31 ms |
+| 冒烟 | `/admin/login` 200 且含登录表单；`/admin/licenses`、`/admin/trials` 302（未登录跳转，符合预期）；`/v1/community/info` 200 |
+| 线上查询计划 | lifetime `SEARCH telemetry_session_state USING INDEX telemetry_session_state_install_idx (install_id=?)`；试用资格 `SEARCH trial_grants … (fingerprint_hash=? AND status=?)`；兑换码 `SCAN licenses USING INDEX licenses_created_idx`；试用列表 `SCAN trial_grants USING INDEX trial_grants_created_idx`（两者都**不再** `USE TEMP B-TREE FOR ORDER BY`） |
+
+**回滚**（如需）：`git revert bf4b3e1 && npm run deploy`；
+索引可保留（不影响旧代码），要彻底还原执行 migration 里注释的四条 `DROP INDEX`。
