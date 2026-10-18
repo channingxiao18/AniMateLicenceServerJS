@@ -831,9 +831,10 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
       prev = val;
       return row;
     }).join("");
-    const versionRows = vrows.map((v) => `<tr class="${v.small ? "muted" : ""}">
-      <td><b>${e(v.version)}</b></td>
+    const versionRows = vrows.map((v) => `<tr class="${v.mature ? (v.small ? "muted" : "") : "muted"}">
+      <td><b>${e(v.version)}</b>${v.mature ? "" : ' <span class="badge warn">进行中</span>'}</td>
       <td class="num-cell">${e(v.releaseDay)}</td>
+      <td class="num-cell">${v.observedDays}/7 天</td>
       <td class="num-cell">${v.installs.toLocaleString()}</td>
       <td class="num-cell">${pct(v.s1, v.installs)}</td>
       <td class="num-cell">${pct(v.s2, v.installs)}</td>
@@ -904,9 +905,9 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
         <table><thead><tr><th>子步骤</th><th style="width:20%">进度</th><th class="num-cell">设备</th><th class="num-cell">转化</th><th>说明</th></tr></thead>
         <tbody>${bdHtml}</tbody></table>
         <p class="muted" style="font-size:12px;padding:10px 16px">导入成功率 96.8%（取消是"没选文件"，不是失败）；真 AI 只有 21.4%（主动发言 126 → 27），是全线最大断裂。</p></section>
-      <section class="report-section"><div class="section-head"><h3>B · 版本对比</h3><span>按首见版本 · 等长窗口 · 只在 n≥100 时看差异</span></div>
-        <table><thead><tr><th>首见版本</th><th class="num-cell">首次出现</th><th class="num-cell">装机</th><th class="num-cell">启动</th><th class="num-cell">导览</th><th class="num-cell">核心</th><th class="num-cell">购买</th><th class="num-cell">核心 Δ</th><th></th></tr></thead>
-        <tbody>${versionRows || `<tr><td colspan="9" class="muted">暂无数据，请先执行 scripts/backfill_funnel.sql</td></tr>`}</tbody></table></section>
+      <section class="report-section"><div class="section-head"><h3>B · 版本对比</h3><span>按首见版本 · 未满 7 天的版本标"进行中"且不参与 Δ</span></div>
+        <table><thead><tr><th>首见版本</th><th class="num-cell">首次出现</th><th class="num-cell">观察</th><th class="num-cell">装机</th><th class="num-cell">启动</th><th class="num-cell">导览</th><th class="num-cell">核心</th><th class="num-cell">购买</th><th class="num-cell">核心 Δ</th><th></th></tr></thead>
+        <tbody>${versionRows || `<tr><td colspan="10" class="muted">暂无数据，请先执行 scripts/backfill_funnel.sql</td></tr>`}</tbody></table></section>
       <section class="report-section"><div class="section-head"><h3>D · 功能组合阶梯</h3>
         <span>3 个核心功能的 8 种组合 · 只在 CI 不重叠时标 ★</span></div>
         <table><thead><tr><th>组合（舞/导/AI）</th><th class="num-cell">n</th><th class="num-cell">购买率</th><th class="num-cell">95% CI</th><th class="num-cell">支付率</th><th class="num-cell">增量</th><th class="num-cell">未覆盖</th></tr></thead>

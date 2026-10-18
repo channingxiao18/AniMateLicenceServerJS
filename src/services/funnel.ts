@@ -33,6 +33,7 @@ export type FunnelDayRow = {
 export type FunnelVersionRow = {
   version: string;
   releaseDay: string;
+  observedDays: number;
   installs: number;
   s1: number;
   s2: number;
@@ -160,6 +161,7 @@ export async function getFunnelReport(
   const versionRows = await db.all(sql`
     SELECT first_app_version AS version,
       MIN(install_day) AS release_day,
+      CAST(julianday(date('now')) - julianday(MIN(install_day)) AS INTEGER) AS observed_days,
       COUNT(*) AS installs,
       SUM(CASE WHEN t_first_frame IS NOT NULL AND julianday(datetime(t_first_frame,'unixepoch')) - julianday(install_at) <= 3 THEN 1 ELSE 0 END) AS s1,
       SUM(CASE WHEN t_first_frame IS NOT NULL AND julianday(datetime(t_first_frame,'unixepoch')) - julianday(install_at) <= 3
@@ -169,7 +171,7 @@ export async function getFunnelReport(
       SUM(CASE WHEN t_purchase_click IS NOT NULL THEN 1 ELSE 0 END) AS s6,
       SUM(CASE WHEN t_activated IS NOT NULL THEN 1 ELSE 0 END) AS paid
     FROM telemetry_install_profile
-    WHERE install_day >= ${from} AND install_day <= ${to}
+    WHERE install_day >= ${from} AND install_day <= date('now')
     GROUP BY first_app_version ORDER BY installs DESC
   `) as unknown as Array<Record<string, unknown>>;
 
@@ -180,6 +182,7 @@ export async function getFunnelReport(
     versions: versionRows.map((r) => ({
       version: String(r.version),
       releaseDay: String(r.release_day),
+      observedDays: num(r.observed_days),
       installs: num(r.installs),
       s1: num(r.s1), s2: num(r.s2), s3: num(r.s3), s6: num(r.s6), paid: num(r.paid),
     })),
@@ -245,19 +248,24 @@ export function compareVersions(rows: FunnelVersionRow[]): Array<FunnelVersionRo
   s3Rate: number;
   buyRate: number;
   small: boolean;
+  mature: boolean;
   deltaS3: number | null;
 }> {
+  // 成熟 = 该版本的首个安装日距今天 >= 7 天（观察窗口走完）
   const ordered = [...rows].sort((a, b) => b.installs - a.installs);
   return ordered.map((r, i) => {
     const prev = ordered[i - 1];
     const s3Rate = r.installs ? (100 * r.s3) / r.installs : 0;
     const prevRate = prev && prev.installs ? (100 * prev.s3) / prev.installs : null;
+    const mature = (r.observedDays ?? 0) >= 7;
     return {
       ...r,
       s3Rate: Math.round(s3Rate * 10) / 10,
       buyRate: r.installs ? Math.round((1000 * r.s6) / r.installs) / 10 : 0,
       small: r.installs < 100,
-      deltaS3: prevRate === null ? null : Math.round((s3Rate - prevRate) * 10) / 10,
+      mature,
+      // 未满 7 天的版本不参与 Δ（分母还没长齐）
+      deltaS3: prevRate === null || !mature ? null : Math.round((s3Rate - prevRate) * 10) / 10,
     };
   });
 }

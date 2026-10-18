@@ -26,8 +26,8 @@ describe("stageRates", () => {
 
 describe("compareVersions", () => {
   const rows: FunnelVersionRow[] = [
-    { version: "0.12.2", releaseDay: "2026-09-30", installs: 689, s1: 678, s2: 460, s3: 410, s6: 143, paid: 18 },
-    { version: "0.13.1", releaseDay: "2026-10-15", installs: 69, s1: 67, s2: 64, s3: 56, s6: 12, paid: 2 },
+    { version: "0.12.2", releaseDay: "2026-09-30", observedDays: 18, installs: 689, s1: 678, s2: 460, s3: 410, s6: 143, paid: 18 },
+    { version: "0.13.1", releaseDay: "2026-10-15", observedDays: 8, installs: 69, s1: 67, s2: 64, s3: 56, s6: 12, paid: 2 },
   ];
 
   it("按装机量降序并给出核心层 Δ", () => {
@@ -45,8 +45,14 @@ describe("compareVersions", () => {
   });
 
   it("空安装量不产生 NaN", () => {
-    const out = compareVersions([{ version: "x", releaseDay: "2026-10-01", installs: 0, s1: 0, s2: 0, s3: 0, s6: 0, paid: 0 }]);
+    const out = compareVersions([{ version: "x", releaseDay: "2026-10-01", observedDays: 17, installs: 0, s1: 0, s2: 0, s3: 0, s6: 0, paid: 0 }]);
     expect(out[0].s3Rate).toBe(0);
     expect(out[0].buyRate).toBe(0);
+  });
+
+  it("未满 7 天的版本不参与 Δ", () => {
+    const out = compareVersions([{ version: "new", releaseDay: "2026-10-16", observedDays: 2, installs: 30, s1: 30, s2: 20, s3: 15, s6: 3, paid: 0 }]);
+    expect(out[0].mature).toBe(false);
+    expect(out[0].deltaS3).toBeNull();
   });
 });
