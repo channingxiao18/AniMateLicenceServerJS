@@ -792,7 +792,7 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
   router.get("/telemetry/reports", (c) => c.redirect("/admin/telemetry/installs"));
 
   router.get("/telemetry/funnel", async (c) => {
-    const days = Number(c.req.query("days") || 30);
+    const days = Number(c.req.query("days") ?? 0);
     const version = c.req.query("version") || "";
     const page = Number(c.req.query("page") || 1);
     const report = await getFunnelReport(db, { days, version });
@@ -888,8 +888,8 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     const pageCount = Math.max(1, Math.ceil(users.total / users.pageSize));
     const content = `<div class="report-shell">
       <div class="report-head"><div><h2>用户转化路径</h2>
-        <p class="muted">口径 path_v1 · 窗口 S0–S3/S6 取首 72h、S4–S5/S7 取首 7 天 · cohort ${e(report.filters.from)} ~ ${e(report.filters.to)} · 已满窗 ${t.s0.toLocaleString()} 台</p></div>
-        <div class="range-switch">${[7, 30, 90].map((d) => `<a class="${days === d ? "active" : ""}" href="${qs({ days: d, page: 1 })}">${d}天</a>`).join("")}</div></div>
+        <p class="muted">口径 path_v1 · 窗口 S0–S3/S6 取首 72h、S4–S5/S7 取首 7 天 · cohort ${days === 0 ? "全部历史" : e(report.filters.from)} ~ ${e(report.filters.to)} · 已满窗 ${t.s0.toLocaleString()} 台</p></div>
+        <div class="range-switch">${[[0, "全部"], [7, "7天"], [30, "30天"], [90, "90天"], [180, "180天"]].map(([d, label]) => `<a class="${days === Number(d) ? "active" : ""}" href="${qs({ days: Number(d), page: 1 })}">${label}</a>`).join("")}</div></div>
       <div class="metric-strip">
         <div class="metric"><div class="metric-label">新增安装</div><div class="metric-value">${t.s0.toLocaleString()}</div></div>
         <div class="metric"><div class="metric-label">正常启动</div><div class="metric-value">${r.s1}%</div></div>

@@ -79,8 +79,17 @@ function daysAgo(days: number): string {
   return dayString(new Date(Date.now() - days * DAY_MS));
 }
 
-function reportDays(value: number | undefined, fallback = 30): number {
-  return Math.min(180, Math.max(1, Number.isFinite(value) ? Math.floor(value!) : fallback));
+function reportDays(value: number | undefined, fallback = 0): number {
+  // 0 = 全部历史；其余为"最近 N 天"
+  if (Number.isFinite(value) && Math.floor(value!) === 0) return 0;
+  return Math.min(365, Math.max(1, Number.isFinite(value) ? Math.floor(value!) : fallback));
+}
+
+/** 已满窗 cohort 的区间：结束于 today-7，起点按 days（0=全部）。 */
+function cohortRange(days: number): { from: string; to: string } {
+  const to = daysAgo(WINDOW_DAYS);
+  const from = days === 0 ? "2000-01-01" : daysAgo(WINDOW_DAYS + days - 1);
+  return { from, to };
 }
 
 function num(v: unknown): number {
@@ -95,8 +104,7 @@ export async function getFunnelReport(
   const days = reportDays(params.days);
   const version = params.version && params.version !== "all" ? params.version : null;
   // 只统计已满窗的 cohort：安装日 + 7 天 <= 今天
-  const to = daysAgo(WINDOW_DAYS);
-  const from = daysAgo(WINDOW_DAYS + days - 1);
+  const { from, to } = cohortRange(days);
 
   const totalsRows = await db.all(sql`
     SELECT
@@ -199,8 +207,7 @@ export async function listFunnelUsers(
   const version = params.version && params.version !== "all" ? params.version : null;
   const page = Math.max(1, Math.floor(params.page || 1));
   const pageSize = Math.min(100, Math.max(1, Math.floor(params.pageSize || 25)));
-  const to = daysAgo(WINDOW_DAYS);
-  const from = daysAgo(WINDOW_DAYS + days - 1);
+  const { from, to } = cohortRange(days);
 
   const countRows = await db.all(sql`
     SELECT COUNT(*) AS n FROM telemetry_install_profile
@@ -323,8 +330,7 @@ export async function getFeatureCombos(
 ): Promise<{ rows: FeatureComboRow[]; totals: { dance: number; imp: number; ai: number; installs: number } }> {
   const days = reportDays(params.days);
   const version = params.version && params.version !== "all" ? params.version : null;
-  const to = daysAgo(WINDOW_DAYS);
-  const from = daysAgo(WINDOW_DAYS + days - 1);
+  const { from, to } = cohortRange(days);
 
   const raw = await db.all(sql`
     SELECT f_dance AS d, f_import AS i, f_ai AS a,
@@ -408,8 +414,7 @@ export async function getFunnelBreakdown(
 ): Promise<FunnelBreakdown> {
   const days = reportDays(params.days);
   const version = params.version && params.version !== "all" ? params.version : null;
-  const to = daysAgo(WINDOW_DAYS);
-  const from = daysAgo(WINDOW_DAYS + days - 1);
+  const { from, to } = cohortRange(days);
 
   const rows = await db.all(sql`
     SELECT
