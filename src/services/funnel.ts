@@ -125,6 +125,7 @@ export async function getFunnelReport(
     FROM telemetry_install_profile
     WHERE install_day >= ${from} AND install_day <= ${to}
       AND (${version} IS NULL OR first_app_version = ${version})
+      AND COALESCE(channel, 'official') = 'official'
   `) as unknown as Array<Record<string, unknown>>;
 
   const t = totalsRows[0] ?? {};
@@ -148,6 +149,7 @@ export async function getFunnelReport(
     FROM telemetry_install_profile
     WHERE install_day >= ${from} AND install_day <= ${to}
       AND (${version} IS NULL OR first_app_version = ${version})
+      AND COALESCE(channel, 'official') = 'official'
     GROUP BY install_day ORDER BY install_day
   `) as unknown as Array<Record<string, unknown>>;
 
@@ -204,6 +206,7 @@ export async function listFunnelUsers(
     SELECT COUNT(*) AS n FROM telemetry_install_profile
     WHERE install_day >= ${from} AND install_day <= ${to}
       AND (${version} IS NULL OR first_app_version = ${version})
+      AND COALESCE(channel, 'official') = 'official'
   `) as unknown as Array<Record<string, unknown>>;
   const total = num((countRows[0] ?? {}).n);
 
@@ -214,6 +217,7 @@ export async function listFunnelUsers(
     FROM telemetry_install_profile
     WHERE install_day >= ${from} AND install_day <= ${to}
       AND (${version} IS NULL OR first_app_version = ${version})
+      AND COALESCE(channel, 'official') = 'official'
     ORDER BY install_at DESC
     LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}
   `) as unknown as Array<Record<string, unknown>>;
@@ -251,10 +255,20 @@ export function compareVersions(rows: FunnelVersionRow[]): Array<FunnelVersionRo
   mature: boolean;
   deltaS3: number | null;
 }> {
+  // 最新版本在最上面；Δ 对比的是"上一版"（数组里更老的那个）
   // 成熟 = 该版本的首个安装日距今天 >= 7 天（观察窗口走完）
-  const ordered = [...rows].sort((a, b) => b.installs - a.installs);
+  const verKey = (v: string): number[] => v.split(".").map((x) => { const n = Number(x); return Number.isFinite(n) ? n : -1; });
+  const ordered = [...rows].sort((a, b) => {
+    const ka = verKey(a.version);
+    const kb = verKey(b.version);
+    for (let i = 0; i < Math.max(ka.length, kb.length); i += 1) {
+      const d = (kb[i] ?? 0) - (ka[i] ?? 0);
+      if (d !== 0) return d;
+    }
+    return b.releaseDay.localeCompare(a.releaseDay);
+  });
   return ordered.map((r, i) => {
-    const prev = ordered[i - 1];
+    const prev = ordered[i + 1];
     const s3Rate = r.installs ? (100 * r.s3) / r.installs : 0;
     const prevRate = prev && prev.installs ? (100 * prev.s3) / prev.installs : null;
     const mature = (r.observedDays ?? 0) >= 7;
@@ -320,6 +334,7 @@ export async function getFeatureCombos(
     FROM telemetry_install_profile
     WHERE install_day >= ${from} AND install_day <= ${to}
       AND (${version} IS NULL OR first_app_version = ${version})
+      AND COALESCE(channel, 'official') = 'official'
     GROUP BY f_dance, f_import, f_ai
   `) as unknown as Array<Record<string, unknown>>;
 
@@ -409,6 +424,7 @@ export async function getFunnelBreakdown(
       AND d.day >= p.install_day
       AND d.day <= date(p.install_day, '+6 day')
       AND (${version} IS NULL OR p.first_app_version = ${version})
+      AND COALESCE(p.channel, 'official') = 'official'
   `) as unknown as Array<Record<string, unknown>>;
 
   const r = rows[0] ?? {};
@@ -419,6 +435,7 @@ export async function getFunnelBreakdown(
     FROM telemetry_install_profile
     WHERE install_day >= ${from} AND install_day <= ${to}
       AND (${version} IS NULL OR first_app_version = ${version})
+      AND COALESCE(channel, 'official') = 'official'
   `) as unknown as Array<Record<string, unknown>>;
   const b = base[0] ?? {};
 

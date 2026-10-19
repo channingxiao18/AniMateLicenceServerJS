@@ -30,12 +30,12 @@ describe("compareVersions", () => {
     { version: "0.13.1", releaseDay: "2026-10-15", observedDays: 8, installs: 69, s1: 67, s2: 64, s3: 56, s6: 12, paid: 2 },
   ];
 
-  it("按装机量降序并给出核心层 Δ", () => {
+  it("最新版本在最前，Δ 对比上一版", () => {
     const out = compareVersions(rows);
-    expect(out[0].version).toBe("0.12.2");
-    expect(out[0].deltaS3).toBeNull();
-    expect(out[1].version).toBe("0.13.1");
-    expect(out[1].deltaS3).toBeGreaterThan(0);
+    expect(out[0].version).toBe("0.13.1");
+    expect(out[0].deltaS3).toBeGreaterThan(0);
+    expect(out[1].version).toBe("0.12.2");
+    expect(out[1].deltaS3).toBeNull();
   });
 
   it("n<100 标记为小样本", () => {
