@@ -24,6 +24,15 @@ export interface AppConfig {
   creemTestMode: boolean;
   creemDefaultPlanId: string;
   defaultProductId: string;
+  // Pricing offer (docs/plans/pricing-offer-discount-experiment-plan.md v3).
+  // Kept separate from creemApiKey because Creem API keys are scoped: the
+  // licensing key only needs /licenses/*, the discount key needs /discounts/*.
+  creemDiscountsApiKey: string;
+  pricingOfferProductIds: string[];
+  pricingOfferCampaignId: string;
+  pricingOfferPoolLowWatermark: number;
+  pricingOfferPurchaseBaseUrl: string;
+  pricingOfferAutoCreateCodes: boolean;
   telemetryTokens: string;
   trialEnabled: boolean;
   trialFullFeatureDurationSeconds: number;
@@ -106,6 +115,24 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
       env.CREEM_DEFAULT_PRODUCT_ID ||
       "animate-companion-lifetime-basic-v1",
     defaultProductId: env.DEFAULT_PRODUCT_ID || "animate",
+    creemDiscountsApiKey: env.CREEM_DISCOUNTS_API_KEY || "",
+    pricingOfferProductIds: (
+      env.CREEM_OFFER_PRODUCT_IDS ||
+      env.CREEM_OFFER_PRODUCT_ID ||
+      "prod_3aAnxDU5cyTq7UlRjExEWh"
+    )
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+    pricingOfferCampaignId: env.PRICING_OFFER_CAMPAIGN_ID || "",
+    pricingOfferPoolLowWatermark: parseInt(
+      env.PRICING_OFFER_POOL_LOW_WATERMARK || "20",
+      10
+    ),
+    pricingOfferPurchaseBaseUrl:
+      env.PRICING_OFFER_PURCHASE_BASE_URL || "https://getanimate.app/buy",
+    pricingOfferAutoCreateCodes:
+      (env.PRICING_OFFER_AUTO_CREATE_CODES || "true").toLowerCase() !== "false",
     telemetryTokens:
       env.TELEMETRY_TOKENS ||
       "animate-desktop-prod-v1:desktop_prod,animate-desktop-dev:desktop_dev",

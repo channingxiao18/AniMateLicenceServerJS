@@ -30,6 +30,13 @@ import { products } from "../db/schema";
 import { eq } from "drizzle-orm";
 import { FeedbackError, feedbackCountForMachine, recordFeedback, validateFeedbackBody } from "../services/feedback";
 import { readCommunityInfo } from "../services/community";
+import {
+  claimPricingOffer,
+  getEligibility,
+  getOfferStatus,
+  validateClaimBody,
+  validateEligibilityBody,
+} from "../services/pricing_offer";
 
 type ClientBody = {
   product_id?: string;
@@ -61,8 +68,8 @@ function readClientBody(body: ClientBody) {
   };
 }
 
-function statusFor(err: ActivationError): 200 | 400 | 403 | 404 | 409 | 429 | 500 | 502 {
-  return err.statusCode as 200 | 400 | 403 | 404 | 409 | 429 | 500 | 502;
+function statusFor(err: ActivationError): 200 | 400 | 403 | 404 | 409 | 429 | 500 | 502 | 503 {
+  return err.statusCode as 200 | 400 | 403 | 404 | 409 | 429 | 500 | 502 | 503;
 }
 
 /**
@@ -666,6 +673,72 @@ export function createV1Router(
       return c.json(info);
     } catch (err) {
       console.error("Community info error:", err);
+      return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
+    }
+  });
+
+  // ── Pricing offer (multi-touch discount campaign) ──────────────────────
+  //
+  // Eligibility is POST rather than GET because the first eligible check has a
+  // deliberate side effect: it records the randomized arm assignment. That is
+  // what makes the per-arm denominator a cohort instead of the self-selected
+  // claimants. Claim is idempotent and returns the same code on retry.
+  router.post("/pricing-offer/eligibility", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "INVALID_REQUEST", message: "请求体格式无效" }, 400);
+    }
+    try {
+      const request = validateEligibilityBody(body);
+      const result = await getEligibility(db, config, request);
+      c.header("Cache-Control", "no-store");
+      return c.json(result);
+    } catch (err) {
+      if (err instanceof ActivationError) {
+        return c.json(activationErrorBody(err), statusFor(err));
+      }
+      console.error("Pricing offer eligibility error:", err);
+      return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
+    }
+  });
+
+  router.post("/pricing-offer/claim", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "INVALID_REQUEST", message: "请求体格式无效" }, 400);
+    }
+    try {
+      const request = validateClaimBody(body);
+      const result = await claimPricingOffer(db, config, request, (c.get("clientIp") as string) || "unknown");
+      c.header("Cache-Control", "no-store");
+      return c.json(result);
+    } catch (err) {
+      if (err instanceof ActivationError) {
+        return c.json(activationErrorBody(err), statusFor(err));
+      }
+      console.error("Pricing offer claim error:", err);
+      return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
+    }
+  });
+
+  router.get("/pricing-offer/status", async (c) => {
+    try {
+      const request = validateEligibilityBody({
+        machine_hash: c.req.query("machine_hash") || "",
+        campaign_id: c.req.query("campaign_id") || undefined,
+      });
+      const result = await getOfferStatus(db, config, request.machineHash, request.campaignId);
+      c.header("Cache-Control", "no-store");
+      return c.json(result);
+    } catch (err) {
+      if (err instanceof ActivationError) {
+        return c.json(activationErrorBody(err), statusFor(err));
+      }
+      console.error("Pricing offer status error:", err);
       return c.json({ error: "SERVER_ERROR", message: "服务器内部错误" }, 500);
     }
   });

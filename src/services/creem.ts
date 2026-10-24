@@ -238,3 +238,140 @@ function mapCreemEventType(raw: string): CanonicalPaymentEvent["eventType"] {
   if (normalized.includes("chargeback") || normalized.includes("dispute")) return "chargeback.created";
   return "purchase.completed";
 }
+
+// ---------------------------------------------------------------------------
+// Discounts API (pricing-offer campaign)
+// ---------------------------------------------------------------------------
+//
+// Creem discount codes are the only automatic way to give a user a unique,
+// one-shot coupon. The API key is scoped, so this deliberately takes its own
+// `CreemConfig` (built from CREEM_DISCOUNTS_API_KEY) instead of reusing the
+// licensing key.
+
+export interface CreemDiscount {
+  id: string;
+  mode: string;
+  object?: string;
+  status: "deleted" | "active" | "draft" | "expired" | "scheduled";
+  name: string;
+  code: string;
+  type: "percentage" | "fixed";
+  amount?: number;
+  currency?: string;
+  percentage?: number;
+  expiry_date?: string | null;
+  max_redemptions?: number | null;
+  duration?: "forever" | "once" | "repeating";
+  duration_in_months?: number | null;
+  applies_to_products?: string[];
+  redeem_count?: number;
+}
+
+export interface CreateDiscountInput {
+  name: string;
+  code: string;
+  percentage: number;
+  appliesToProducts: string[];
+  expiryDate?: string;
+  maxRedemptions?: number;
+}
+
+export interface DiscountSearchResult {
+  items: CreemDiscount[];
+  pagination: {
+    total_records: number;
+    total_pages: number;
+    current_page: number;
+    next_page: number | null;
+    prev_page: number | null;
+  };
+}
+
+async function creemFetch<T>(
+  config: CreemConfig,
+  method: "GET" | "POST" | "DELETE",
+  endpoint: string,
+  body?: unknown
+): Promise<T> {
+  const url = `${baseUrl(config.testMode)}${endpoint}`;
+  const res = await fetch(url, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": config.apiKey,
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+
+  if (!res.ok) {
+    let errMsg = `Creem API error ${res.status}`;
+    let errCode = "CREEM_API_ERROR";
+    try {
+      const errBody = (await res.json()) as Record<string, string>;
+      errMsg = errBody.message || errMsg;
+      errCode = errBody.error || errCode;
+    } catch {
+      // Keep the status-derived message.
+    }
+    throw new CreemApiError(res.status, errMsg, errCode);
+  }
+
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
+}
+
+export async function createDiscount(
+  config: CreemConfig,
+  input: CreateDiscountInput
+): Promise<CreemDiscount> {
+  return creemFetch<CreemDiscount>(config, "POST", "/v1/discounts", {
+    name: input.name,
+    code: input.code,
+    type: "percentage",
+    percentage: input.percentage,
+    duration: "once",
+    applies_to_products: input.appliesToProducts,
+    ...(input.expiryDate ? { expiry_date: input.expiryDate } : {}),
+    ...(input.maxRedemptions ? { max_redemptions: input.maxRedemptions } : {}),
+  });
+}
+
+export async function searchDiscounts(
+  config: CreemConfig,
+  opts: { pageNumber?: number; pageSize?: number; createdAfter?: string } = {}
+): Promise<DiscountSearchResult> {
+  const params = new URLSearchParams();
+  params.set("page_number", String(opts.pageNumber ?? 1));
+  params.set("page_size", String(opts.pageSize ?? 100));
+  if (opts.createdAfter) params.set("created_after", opts.createdAfter);
+  return creemFetch<DiscountSearchResult>(
+    config,
+    "GET",
+    `/v1/discounts/search?${params.toString()}`
+  );
+}
+
+export async function getDiscountByCode(
+  config: CreemConfig,
+  code: string
+): Promise<CreemDiscount | null> {
+  const params = new URLSearchParams({ discount_code: code });
+  const result = await creemFetch<CreemDiscount | { items?: CreemDiscount[] }>(
+    config,
+    "GET",
+    `/v1/discounts?${params.toString()}`
+  );
+  if (result && Array.isArray((result as { items?: CreemDiscount[] }).items)) {
+    return (result as { items: CreemDiscount[] }).items[0] ?? null;
+  }
+  return (result as CreemDiscount) ?? null;
+}
+
+export async function deleteDiscount(config: CreemConfig, discountId: string): Promise<void> {
+  await creemFetch<void>(
+    config,
+    "DELETE",
+    `/v1/discounts/${encodeURIComponent(discountId)}/delete`
+  );
+}
+

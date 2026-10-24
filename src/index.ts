@@ -15,6 +15,7 @@ import { createWebhookRouter } from "./routes/webhook";
 import { createCreemAdapter } from "./services/creem";
 import { createProviderRegistry } from "./services/provider";
 import { runFunnelBackfill } from "./services/funnel_jobs";
+import { syncRedemptions } from "./services/pricing_offer";
 
 export interface Env {
   DB: D1Database;
@@ -42,6 +43,13 @@ export interface Env {
   CREEM_TEST_MODE?: string;
   CREEM_DEFAULT_PRODUCT_ID?: string;
   CREEM_DEFAULT_PLAN_ID?: string;
+  CREEM_DISCOUNTS_API_KEY?: string;
+  CREEM_OFFER_PRODUCT_ID?: string;
+  CREEM_OFFER_PRODUCT_IDS?: string;
+  PRICING_OFFER_CAMPAIGN_ID?: string;
+  PRICING_OFFER_POOL_LOW_WATERMARK?: string;
+  PRICING_OFFER_PURCHASE_BASE_URL?: string;
+  PRICING_OFFER_AUTO_CREATE_CODES?: string;
   // Model catalog (Lever 1)
   CATALOG?: R2Bucket;
   CATALOG_ENABLED?: string;
@@ -148,6 +156,22 @@ export default {
         (r) => console.log(`[funnel] backfill ${r.from}~${r.to} ok (${r.statements} stmts)`),
         (err) => console.error(`[funnel] backfill failed: ${err instanceof Error ? err.stack : String(err)}`),
       ),
+    );
+    // Pricing-offer redemptions: one Creem search per campaign, hourly. Failure
+    // never affects the client; the report shows the last successful sync time.
+    ctx.waitUntil(
+      (async () => {
+        try {
+          const db = createDb(env.DB);
+          const config = loadConfig(env as unknown as Record<string, string | undefined>);
+          const result = await syncRedemptions(db, config);
+          console.log(`[pricing-offer] redemption sync: ${JSON.stringify(result)}`);
+        } catch (err) {
+          console.error(
+            `[pricing-offer] redemption sync failed: ${err instanceof Error ? err.stack : String(err)}`
+          );
+        }
+      })()
     );
   },
 

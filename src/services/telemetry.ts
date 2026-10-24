@@ -138,6 +138,15 @@ export const EVENT_NAMES = new Set([
   "trial_llm_turn_used",
   "trial_llm_exhausted",
   "trial_llm_profile_discarded",
+  // --- Pricing offer (AniMate docs/plans/pricing-offer-discount-experiment-plan.md v3) ---
+  // Shown / claim result / dismissed / license blocked come from the Rust
+  // scheduler; code_copied comes from the coupon card. The purchase click reuses
+  // the existing `purchase_clicked` with surface=pricing_offer.
+  "pricing_offer_shown",
+  "pricing_offer_claim_result",
+  "pricing_offer_dismissed",
+  "pricing_offer_license_blocked",
+  "pricing_offer_code_copied",
 ]);
 
 const LICENSE_STATES = new Set([
@@ -303,6 +312,14 @@ export const PRODUCT_EVENT_NAMES = [
   "trial_llm_turn_used",
   "trial_llm_exhausted",
   "trial_llm_profile_discarded",
+  // --- Pricing offer (AniMate docs/plans/pricing-offer-discount-experiment-plan.md v3) ---
+  // Listed here as well as in EVENT_NAMES, for the same three readers documented
+  // above (machine_active mark, per-(day, install) device view, raw event load).
+  "pricing_offer_shown",
+  "pricing_offer_claim_result",
+  "pricing_offer_dismissed",
+  "pricing_offer_license_blocked",
+  "pricing_offer_code_copied",
 ] as const;
 
 /**

@@ -389,6 +389,127 @@ CREATE TABLE IF NOT EXISTS llm_trial_settings (
   value text NOT NULL,
   updated_at text DEFAULT (datetime('now')) NOT NULL
 );
+
+-- migration 0018 (tables only; backfill is manual)
+CREATE TABLE IF NOT EXISTS telemetry_install_profile (
+  install_id text PRIMARY KEY NOT NULL,
+  machine_hash text,
+  install_at text NOT NULL,
+  install_day text NOT NULL,
+  first_app_version text NOT NULL,
+  release_day text,
+  platform text,
+  channel text,
+  os_locale text,
+  gpu_tier text,
+  t_first_frame integer,
+  t_onb_done integer,
+  t_core integer,
+  t_purchase_click integer,
+  t_checkout integer,
+  t_activated integer,
+  activation_provider text,
+  sessions integer DEFAULT 0,
+  active_days integer DEFAULT 0,
+  max_day_span_secs integer DEFAULT 0,
+  liking_score integer,
+  liked integer DEFAULT 0,
+  retained integer DEFAULT 0,
+  trial_granted integer DEFAULT 0,
+  reminder_seen integer DEFAULT 0,
+  f_dance integer DEFAULT 0,
+  f_import integer DEFAULT 0,
+  f_ai integer DEFAULT 0,
+  built_at text
+);
+CREATE INDEX IF NOT EXISTS idx_tip_day ON telemetry_install_profile (install_day);
+CREATE INDEX IF NOT EXISTS idx_tip_ver ON telemetry_install_profile (first_app_version, install_day);
+CREATE INDEX IF NOT EXISTS idx_tip_machine ON telemetry_install_profile (machine_hash);
+
+-- migration 0019 (pricing offer)
+CREATE TABLE IF NOT EXISTS pricing_offer_campaigns (
+  campaign_id text PRIMARY KEY NOT NULL,
+  name text NOT NULL,
+  status text DEFAULT 'draft' NOT NULL,
+  product_id text NOT NULL,
+  creem_product_id text NOT NULL,
+  applies_to_products_json text DEFAULT '[]' NOT NULL,
+  min_install_hours integer DEFAULT 48 NOT NULL,
+  min_active_days integer DEFAULT 2 NOT NULL,
+  code_expiry_days integer DEFAULT 14 NOT NULL,
+  price_cents integer DEFAULT 990 NOT NULL,
+  currency text DEFAULT 'USD' NOT NULL,
+  max_impressions integer DEFAULT 2 NOT NULL,
+  impression_cooldown_days integer DEFAULT 7 NOT NULL,
+  purchase_base_url text DEFAULT 'https://getanimate.app/buy' NOT NULL,
+  started_at text,
+  ended_at text,
+  metadata_json text,
+  created_at text DEFAULT (datetime('now')) NOT NULL,
+  updated_at text DEFAULT (datetime('now')) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pricing_offer_campaigns_status_idx ON pricing_offer_campaigns (status, created_at);
+
+CREATE TABLE IF NOT EXISTS pricing_offer_arms (
+  arm_id text PRIMARY KEY NOT NULL,
+  campaign_id text NOT NULL,
+  label text NOT NULL,
+  discount_percent integer NOT NULL,
+  weight integer DEFAULT 25 NOT NULL,
+  pool_target integer DEFAULT 0 NOT NULL,
+  created_at text DEFAULT (datetime('now')) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pricing_offer_arms_campaign_idx ON pricing_offer_arms (campaign_id);
+
+CREATE TABLE IF NOT EXISTS pricing_offer_assignments (
+  campaign_id text NOT NULL,
+  machine_hash text NOT NULL,
+  arm_id text NOT NULL,
+  assigned_at text DEFAULT (datetime('now')) NOT NULL,
+  PRIMARY KEY (campaign_id, machine_hash)
+);
+CREATE INDEX IF NOT EXISTS pricing_offer_assignments_arm_idx ON pricing_offer_assignments (campaign_id, arm_id);
+
+CREATE TABLE IF NOT EXISTS pricing_offer_codes (
+  code text PRIMARY KEY NOT NULL,
+  campaign_id text NOT NULL,
+  arm_id text NOT NULL,
+  creem_discount_id text NOT NULL,
+  status text DEFAULT 'available' NOT NULL,
+  issued_to_machine_hash text,
+  issued_at text,
+  expires_at text,
+  redeem_count integer DEFAULT 0 NOT NULL,
+  redeem_checked_at text,
+  created_at text DEFAULT (datetime('now')) NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS pricing_offer_codes_machine_unique
+  ON pricing_offer_codes (campaign_id, issued_to_machine_hash)
+  WHERE issued_to_machine_hash IS NOT NULL;
+CREATE INDEX IF NOT EXISTS pricing_offer_codes_arm_status
+  ON pricing_offer_codes (campaign_id, arm_id, status, created_at);
+
+CREATE TABLE IF NOT EXISTS pricing_offer_claims (
+  claim_id text PRIMARY KEY NOT NULL,
+  campaign_id text NOT NULL,
+  arm_id text NOT NULL,
+  machine_hash text NOT NULL,
+  code text NOT NULL,
+  touchpoint text NOT NULL,
+  stage text DEFAULT 'first' NOT NULL,
+  intent_tier integer,
+  app_version text,
+  channel text,
+  locale text,
+  install_age_hours integer,
+  active_days integer,
+  ip_hash text,
+  created_at text DEFAULT (datetime('now')) NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS pricing_offer_claims_machine_unique
+  ON pricing_offer_claims (campaign_id, machine_hash);
+CREATE INDEX IF NOT EXISTS pricing_offer_claims_arm_idx
+  ON pricing_offer_claims (campaign_id, arm_id, created_at);
 `;
 
 export function createTestDb(): { sqlite: Database.Database; db: AppDb } {
@@ -443,6 +564,12 @@ export function createTestConfig(rsaPrivateKeyPkcs8Hex: string): AppConfig {
     creemTestMode: true,
     creemDefaultPlanId: "animate-companion-lifetime-basic-v1",
     defaultProductId: "animate",
+    creemDiscountsApiKey: "",
+    pricingOfferProductIds: ["prod_test"],
+    pricingOfferCampaignId: "",
+    pricingOfferPoolLowWatermark: 20,
+    pricingOfferPurchaseBaseUrl: "https://getanimate.app/buy",
+    pricingOfferAutoCreateCodes: false,
     telemetryTokens: "animate-desktop-prod-v1:desktop_prod,animate-desktop-dev:desktop_dev",
     trialEnabled: true,
     trialFullFeatureDurationSeconds: 86400,

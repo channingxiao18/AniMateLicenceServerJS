@@ -24,6 +24,7 @@ import { readCatalogCardEnabled } from "../services/catalog";
 import { listLlmTrialKeys, listLlmTrialPools, readLlmTrialEnabled } from "../services/llm_trial";
 import { listTrialGrants } from "../services/trial";
 import { listFeedback } from "../services/feedback";
+import { getCampaign, getReport, listCampaigns, listCodes } from "../services/pricing_offer";
 import {
   getActivityDays,
   getInstallationDays,
@@ -107,6 +108,7 @@ const navItems = [
   ["/admin/telemetry/products", "行为漏斗"],
   ["/admin/telemetry/events", "原始事件"],
   ["/admin/feedback", "用户反馈"],
+  ["/admin/pricing-offer", "定价折扣"],
   ["/admin/logs", "日志"],
 ];
 
@@ -1113,6 +1115,190 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
   });
 
   router.get("/orders", (c) => c.redirect("/admin/licenses"));
+
+  // ── Pricing offer (multi-touch discount campaign) ──────────────────────
+  router.get("/pricing-offer", async (c) => {
+    const campaigns = await listCampaigns(db);
+    const rows = campaigns
+      .map((campaign) => {
+        const arms = campaign.arms
+          .map((arm) => `${e(arm.label)} (${arm.discountPercent}%)`)
+          .join(" · ");
+        const statusAction =
+          campaign.status === "active"
+            ? `<form method="post" action="/admin/api/pricing-offer/campaigns/${encodeURIComponent(campaign.campaignId)}/status" style="display:inline"><input type="hidden" name="status" value="paused"><button>暂停</button></form>`
+            : `<form method="post" action="/admin/api/pricing-offer/campaigns/${encodeURIComponent(campaign.campaignId)}/status" style="display:inline"><input type="hidden" name="status" value="active"><button class="primary">启用</button></form>`;
+        return `<tr>
+          <td><a class="day-link" href="/admin/pricing-offer/${encodeURIComponent(campaign.campaignId)}"><code>${e(campaign.campaignId)}</code></a></td>
+          <td>${e(campaign.name)}</td>
+          <td>${badge(campaign.status)}</td>
+          <td>${e(arms || "-")}</td>
+          <td>${e(campaign.minInstallHours)}h / ${e(campaign.minActiveDays)} 天</td>
+          <td>${e(campaign.priceCents)} ${e(campaign.currency)}</td>
+          <td>${e(campaign.createdAt)}</td>
+          <td class="actions">${statusAction} <a class="btn quiet" href="/admin/pricing-offer/${encodeURIComponent(campaign.campaignId)}">详情</a></td>
+        </tr>`;
+      })
+      .join("");
+
+    const defaultArms = JSON.stringify(
+      [
+        { label: "9折", discountPercent: 10, weight: 25 },
+        { label: "8折", discountPercent: 20, weight: 25 },
+        { label: "7折", discountPercent: 30, weight: 25 },
+        { label: "5折", discountPercent: 50, weight: 25 },
+      ],
+      null,
+      2
+    );
+
+    const createForm = `<form method="post" action="/admin/api/pricing-offer/campaigns" class="card">
+      <h3 style="margin-top:0">新建活动</h3>
+      <div class="form-grid">
+        <label>名称<input name="name" value="AniMate 定价感谢券" required></label>
+        <label>campaign_id（留空自动）<input name="campaign_id" placeholder="cmp_2026_10"></label>
+        <label>最低安装小时<input name="min_install_hours" type="number" value="48"></label>
+        <label>最低活跃天<input name="min_active_days" type="number" value="2"></label>
+        <label>券有效期（天）<input name="code_expiry_days" type="number" value="14"></label>
+        <label>售价（美分）<input name="price_cents" type="number" value="990"></label>
+        <label>Creem 商品 ID<input name="creem_product_id" value="prod_3aAnxDU5cyTq7UlRjExEWh"></label>
+        <label>购买页<input name="purchase_base_url" value="https://getanimate.app/buy"></label>
+      </div>
+      <label>档位 JSON<textarea name="arms_json" rows="7" style="width:100%;font-family:ui-monospace,monospace">${e(defaultArms)}</textarea></label>
+      <div class="actions"><button class="primary">创建（draft）</button><span class="muted">创建后到详情页生成券池并启用</span></div>
+    </form>`;
+
+    return c.html(
+      shell(
+        "定价折扣",
+        "/admin/pricing-offer",
+        `${createForm}<div class="card"><h3 style="margin-top:0">活动</h3><table><thead><tr><th>campaign_id</th><th>名称</th><th>状态</th><th>档位</th><th>门槛</th><th>售价</th><th>创建</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="8" class="muted">还没有活动</td></tr>`}</tbody></table></div>`
+      )
+    );
+  });
+
+  router.get("/pricing-offer/:id", async (c) => {
+    const campaignId = c.req.param("id");
+    const detail = await getCampaign(db, campaignId);
+    if (!detail) return c.notFound();
+    const report = (await getReport(db, campaignId)) as {
+      campaign: {
+        id: string;
+        name: string;
+        status: string;
+        started_at: string | null;
+        ended_at: string | null;
+        min_install_hours: number;
+        min_active_days: number;
+        price_cents: number;
+        currency: string;
+      };
+      arms: Array<{
+        arm_id: string;
+        label: string;
+        discount_percent: number;
+        eligible: number;
+        claimed: number;
+        codes_total: number;
+        issued: number;
+        redeemed: number;
+        claim_rate: number | null;
+        redeem_rate: number | null;
+        revenue_cents: number;
+        revenue_per_eligible_cents: number | null;
+      }>;
+      touchpoints: Record<string, number>;
+      shown_machines: number;
+    };
+    const codes = await listCodes(db, campaignId);
+
+    const statusAction =
+      detail.campaign.status === "active"
+        ? `<form method="post" action="/admin/api/pricing-offer/campaigns/${encodeURIComponent(campaignId)}/status" style="display:inline"><input type="hidden" name="status" value="paused"><button>暂停</button></form>`
+        : `<form method="post" action="/admin/api/pricing-offer/campaigns/${encodeURIComponent(campaignId)}/status" style="display:inline"><input type="hidden" name="status" value="active"><button class="primary">启用</button></form>`;
+
+    const pct = (value: number | null) =>
+      value === null ? "-" : `${(value * 100).toFixed(1)}%`;
+
+    const armRows = report.arms
+      .map(
+        (arm) => `<tr>
+          <td>${e(arm.label)}</td>
+          <td>${arm.discount_percent}%</td>
+          <td>${arm.eligible}</td>
+          <td>${arm.claimed}</td>
+          <td>${arm.issued}</td>
+          <td>${arm.redeemed}</td>
+          <td>${pct(arm.claim_rate)}</td>
+          <td>${pct(arm.redeem_rate)}</td>
+          <td>$${(arm.revenue_cents / 100).toFixed(2)}</td>
+          <td>$${((arm.revenue_per_eligible_cents ?? 0) / 100).toFixed(2)}</td>
+          <td>
+            <form method="post" action="/admin/api/pricing-offer/campaigns/${encodeURIComponent(campaignId)}/pool" style="display:inline">
+              <input type="hidden" name="arm_id" value="${e(arm.arm_id)}">
+              <input type="hidden" name="count" value="20">
+              <button>生成 20 张</button>
+            </form>
+          </td>
+        </tr>`
+      )
+      .join("");
+
+    const importForms = detail.arms
+      .map(
+        (arm) => `<form method="post" action="/admin/api/pricing-offer/campaigns/${encodeURIComponent(campaignId)}/codes/import" class="card" style="margin:0 0 10px">
+          <input type="hidden" name="arm_id" value="${e(arm.armId)}">
+          <label>手工导入到 <b>${e(arm.label)}</b>（每行一个码）<textarea name="codes" rows="3" style="width:100%;font-family:ui-monospace,monospace"></textarea></label>
+          <div class="actions"><button>导入</button></div>
+        </form>`
+      )
+      .join("");
+
+    const codeRows = codes
+      .map(
+        (code) => `<tr>
+          <td><code>${e(code.code)}</code></td>
+          <td>${badge(code.status)}</td>
+          <td>${e(code.issuedToMachineHash ? `${code.issuedToMachineHash.slice(0, 12)}…` : "-")}</td>
+          <td>${code.redeemCount}</td>
+          <td>${e(code.expiresAt || "-")}</td>
+          <td>${code.status === "void" ? "" : `<form method="post" action="/admin/api/pricing-offer/codes/${encodeURIComponent(code.code)}/void" style="display:inline" onsubmit="return confirm('作废这张码？')"><button>作废</button></form>`}</td>
+        </tr>`
+      )
+      .join("");
+
+    const touchpoints = Object.entries(report.touchpoints)
+      .map(([key, value]) => `${e(key)}: ${value}`)
+      .join(" · ");
+
+    return c.html(
+      shell(
+        "定价折扣 · 活动详情",
+        "/admin/pricing-offer",
+        `<div class="toolbar"><a class="btn quiet" href="/admin/pricing-offer">← 返回</a>${statusAction}
+          <form method="post" action="/admin/api/pricing-offer/sync" style="display:inline"><button>同步核销</button></form>
+          <span class="muted">${e(detail.campaign.name)} · ${badge(detail.campaign.status)}</span></div>
+        <div class="card"><h3 style="margin-top:0">活动信息</h3>
+          <table><tbody>
+            <tr><th>campaign_id</th><td><code>${e(campaignId)}</code></td><th>门槛</th><td>${e(detail.campaign.minInstallHours)}h / ${e(detail.campaign.minActiveDays)} 天</td></tr>
+            <tr><th>售价</th><td>${e(detail.campaign.priceCents)} ${e(detail.campaign.currency)}</td><th>创建/结束</th><td>${e(detail.campaign.createdAt)} / ${e(detail.campaign.endedAt || "-")}</td></tr>
+            <tr><th>曝光机器</th><td>${report.shown_machines}</td><th>触点</th><td>${e(touchpoints || "-")}</td></tr>
+          </tbody></table>
+        </div>
+        <div class="card"><h3 style="margin-top:0">分组报表</h3>
+          <table><thead><tr><th>档位</th><th>折扣</th><th>随机分配</th><th>已领</th><th>已发码</th><th>已核销</th><th>领券率</th><th>核销率</th><th>净收</th><th>净收/分配</th><th>补池</th></tr></thead>
+          <tbody>${armRows || `<tr><td colspan="11" class="muted">暂无档位</td></tr>`}</tbody></table>
+          <p class="muted" style="font-size:12px">「随机分配」是符合条件时写入 cohort 的台数；领券率 = 已领 / 随机分配；核销率 = 已核销 / 已领。样本未满 14 天时只看方向，不做显著性。</p>
+        </div>
+        <div class="card"><h3 style="margin-top:0">手工码兜底</h3>${importForms || `<p class="muted">暂无档位</p>`}</div>
+        <div class="card"><h3 style="margin-top:0">券码（最近 200）</h3>
+          <div class="table-scroll"><table><thead><tr><th>码</th><th>状态</th><th>领取机器</th><th>核销数</th><th>到期</th><th>操作</th></tr></thead>
+          <tbody>${codeRows || `<tr><td colspan="6" class="muted">还没有券码</td></tr>`}</tbody></table></div>
+        </div>`
+      )
+    );
+  });
+
   router.get("/orders/:key", (c) => c.redirect(`/admin/licenses/${encodeURIComponent(c.req.param("key"))}`));
   router.get("*", async (c) => {
     const pathname = new URL(c.req.url).pathname;

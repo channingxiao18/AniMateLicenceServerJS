@@ -324,6 +324,46 @@ export const telemetrySessionState = sqliteTable(
   })
 );
 
+export const telemetryInstallProfile = sqliteTable(
+  "telemetry_install_profile",
+  {
+    installId: text("install_id").primaryKey(),
+    machineHash: text("machine_hash"),
+    installAt: text("install_at").notNull(),
+    installDay: text("install_day").notNull(),
+    firstAppVersion: text("first_app_version").notNull(),
+    releaseDay: text("release_day"),
+    platform: text("platform"),
+    channel: text("channel"),
+    osLocale: text("os_locale"),
+    gpuTier: text("gpu_tier"),
+    tFirstFrame: integer("t_first_frame"),
+    tOnbDone: integer("t_onb_done"),
+    tCore: integer("t_core"),
+    tPurchaseClick: integer("t_purchase_click"),
+    tCheckout: integer("t_checkout"),
+    tActivated: integer("t_activated"),
+    activationProvider: text("activation_provider"),
+    sessions: integer("sessions").default(0),
+    activeDays: integer("active_days").default(0),
+    maxDaySpanSecs: integer("max_day_span_secs").default(0),
+    likingScore: integer("liking_score"),
+    liked: integer("liked").default(0),
+    retained: integer("retained").default(0),
+    trialGranted: integer("trial_granted").default(0),
+    reminderSeen: integer("reminder_seen").default(0),
+    fDance: integer("f_dance").default(0),
+    fImport: integer("f_import").default(0),
+    fAi: integer("f_ai").default(0),
+    builtAt: text("built_at"),
+  },
+  (table) => ({
+    dayIdx: index("idx_tip_day").on(table.installDay),
+    versionIdx: index("idx_tip_ver").on(table.firstAppVersion, table.installDay),
+    machineIdx: index("idx_tip_machine").on(table.machineHash),
+  })
+);
+
 export const telemetryDailyMetrics = sqliteTable(
   "telemetry_daily_metrics",
   {
@@ -577,3 +617,126 @@ export const catalogGrants = sqliteTable(
     modelIdx: index("catalog_grants_model_idx").on(table.modelId),
   })
 );
+
+// ─── Pricing offer (docs/plans/pricing-offer-discount-experiment-plan.md v3) ───
+//
+// A multi-touch discount campaign. The arm is assigned at the first eligible
+// check (pricing_offer_assignments), not at claim time, so the per-arm
+// denominator is a randomized cohort rather than the self-selected claimants.
+// Codes are unique per machine (max_redemptions=1 on the Creem side), which
+// makes `redeem_count > 0` an exact per-user conversion signal.
+export const pricingOfferCampaigns = sqliteTable(
+  "pricing_offer_campaigns",
+  {
+    campaignId: text("campaign_id").primaryKey(),
+    name: text("name").notNull(),
+    status: text("status").notNull().default("draft"),
+    productId: text("product_id").notNull(),
+    creemProductId: text("creem_product_id").notNull(),
+    appliesToProductsJson: text("applies_to_products_json").notNull().default("[]"),
+    minInstallHours: integer("min_install_hours").notNull().default(48),
+    minActiveDays: integer("min_active_days").notNull().default(2),
+    codeExpiryDays: integer("code_expiry_days").notNull().default(14),
+    priceCents: integer("price_cents").notNull().default(990),
+    currency: text("currency").notNull().default("USD"),
+    maxImpressions: integer("max_impressions").notNull().default(2),
+    impressionCooldownDays: integer("impression_cooldown_days").notNull().default(7),
+    purchaseBaseUrl: text("purchase_base_url").notNull().default("https://getanimate.app/buy"),
+    startedAt: text("started_at"),
+    endedAt: text("ended_at"),
+    metadataJson: text("metadata_json"),
+    createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+    updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => ({
+    statusIdx: index("pricing_offer_campaigns_status_idx").on(table.status, table.createdAt),
+  })
+);
+
+export const pricingOfferArms = sqliteTable(
+  "pricing_offer_arms",
+  {
+    armId: text("arm_id").primaryKey(),
+    campaignId: text("campaign_id").notNull(),
+    label: text("label").notNull(),
+    discountPercent: integer("discount_percent").notNull(),
+    weight: integer("weight").notNull().default(25),
+    poolTarget: integer("pool_target").notNull().default(0),
+    createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => ({
+    campaignIdx: index("pricing_offer_arms_campaign_idx").on(table.campaignId),
+  })
+);
+
+export const pricingOfferAssignments = sqliteTable(
+  "pricing_offer_assignments",
+  {
+    campaignId: text("campaign_id").notNull(),
+    machineHash: text("machine_hash").notNull(),
+    armId: text("arm_id").notNull(),
+    assignedAt: text("assigned_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.campaignId, table.machineHash] }),
+    armIdx: index("pricing_offer_assignments_arm_idx").on(table.campaignId, table.armId),
+  })
+);
+
+export const pricingOfferCodes = sqliteTable(
+  "pricing_offer_codes",
+  {
+    code: text("code").primaryKey(),
+    campaignId: text("campaign_id").notNull(),
+    armId: text("arm_id").notNull(),
+    creemDiscountId: text("creem_discount_id").notNull(),
+    status: text("status").notNull().default("available"),
+    issuedToMachineHash: text("issued_to_machine_hash"),
+    issuedAt: text("issued_at"),
+    expiresAt: text("expires_at"),
+    redeemCount: integer("redeem_count").notNull().default(0),
+    redeemCheckedAt: text("redeem_checked_at"),
+    createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => ({
+    armStatusIdx: index("pricing_offer_codes_arm_status").on(
+      table.campaignId,
+      table.armId,
+      table.status,
+      table.createdAt
+    ),
+  })
+);
+
+export const pricingOfferClaims = sqliteTable(
+  "pricing_offer_claims",
+  {
+    claimId: text("claim_id").primaryKey(),
+    campaignId: text("campaign_id").notNull(),
+    armId: text("arm_id").notNull(),
+    machineHash: text("machine_hash").notNull(),
+    code: text("code").notNull(),
+    touchpoint: text("touchpoint").notNull(),
+    stage: text("stage").notNull().default("first"),
+    intentTier: integer("intent_tier"),
+    appVersion: text("app_version"),
+    channel: text("channel"),
+    locale: text("locale"),
+    installAgeHours: integer("install_age_hours"),
+    activeDays: integer("active_days"),
+    ipHash: text("ip_hash"),
+    createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => ({
+    machineUnique: uniqueIndex("pricing_offer_claims_machine_unique").on(
+      table.campaignId,
+      table.machineHash
+    ),
+    armIdx: index("pricing_offer_claims_arm_idx").on(
+      table.campaignId,
+      table.armId,
+      table.createdAt
+    ),
+  })
+);
+

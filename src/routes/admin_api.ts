@@ -45,6 +45,16 @@ import {
 } from "../services/llm_trial";
 import { readCommunityInfo, writeCommunityInfo } from "../services/community";
 import { deleteTrialGrant } from "../services/trial";
+import {
+  createCampaign,
+  generatePool,
+  getReport,
+  importCodes,
+  listCampaigns,
+  setCampaignStatus,
+  syncRedemptions,
+  voidCode,
+} from "../services/pricing_offer";
 
 import type { ProviderRegistry } from "../services/provider";
 
@@ -164,6 +174,35 @@ function parseBatchKeys(body: Record<string, unknown>): string[] {
   return [];
 }
 
+function parsePricingArms(raw: unknown): Array<{ label: string; discountPercent: number; weight: number }> {
+  const fallback = [
+    { label: "9折", discountPercent: 10, weight: 25 },
+    { label: "8折", discountPercent: 20, weight: 25 },
+    { label: "7折", discountPercent: 30, weight: 25 },
+    { label: "5折", discountPercent: 50, weight: 25 },
+  ];
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new ActivationError("INVALID_REQUEST", "arms_json 格式无效", 400);
+    }
+  }
+  if (!Array.isArray(parsed)) {
+    throw new ActivationError("INVALID_REQUEST", "arms_json 必须是数组", 400);
+  }
+  return parsed.map((item) => {
+    const arm = (item ?? {}) as Record<string, unknown>;
+    return {
+      label: String(arm.label ?? "").trim().slice(0, 32),
+      discountPercent: Number(arm.discountPercent ?? arm.discount_percent ?? 0),
+      weight: Number(arm.weight ?? 25),
+    };
+  });
+}
+
 function okOrRedirect(c: any, payload: Record<string, unknown>) {
   const accept = c.req.header("accept") || "";
   if (accept.includes("text/html")) {
@@ -175,7 +214,7 @@ function okOrRedirect(c: any, payload: Record<string, unknown>) {
   return c.json(payload);
 }
 
-export function createAdminApiRouter(db: Database, _config: AppConfig, registry: ProviderRegistry): Hono {
+export function createAdminApiRouter(db: Database, config: AppConfig, registry: ProviderRegistry): Hono {
   const router = new Hono();
 
   router.post("/products", async (c) => {
@@ -704,7 +743,7 @@ export function createAdminApiRouter(db: Database, _config: AppConfig, registry:
   router.post("/webhook-events/:id/retry", async (c) => {
     try {
       const { retryWebhook } = await import("../services/webhook");
-      const result = await retryWebhook(db, _config, registry, Number(c.req.param("id")));
+      const result = await retryWebhook(db, config, registry, Number(c.req.param("id")));
       return okOrRedirect(c, { status: result.status, message: result.message });
     } catch (err) {
       return errorResponse(c, err);
@@ -816,6 +855,146 @@ export function createAdminApiRouter(db: Database, _config: AppConfig, registry:
   router.post("/orders/:key/reactivate", async (c) => {
     await adminReactivateOrder(db, c.req.param("key"), ip(c));
     return c.redirect("/admin/licenses?success=" + encodeURIComponent("操作成功"));
+  });
+
+  // ── Pricing offer campaign ──────────────────────────────────────────────
+  router.get("/pricing-offer/campaigns", async (c) => {
+    try {
+      return c.json({ campaigns: await listCampaigns(db) });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  router.post("/pricing-offer/campaigns", async (c) => {
+    const body = await readBody(c);
+    try {
+      const result = await createCampaign(db, config, {
+        campaignId: body.campaign_id ? String(body.campaign_id) : undefined,
+        name: String(body.name || "AniMate 定价感谢券"),
+        productId: body.product_id ? String(body.product_id) : undefined,
+        creemProductId: body.creem_product_id ? String(body.creem_product_id) : undefined,
+        minInstallHours: body.min_install_hours ? Number(body.min_install_hours) : undefined,
+        minActiveDays: body.min_active_days ? Number(body.min_active_days) : undefined,
+        codeExpiryDays: body.code_expiry_days ? Number(body.code_expiry_days) : undefined,
+        priceCents: body.price_cents ? Number(body.price_cents) : undefined,
+        currency: body.currency ? String(body.currency) : undefined,
+        purchaseBaseUrl: body.purchase_base_url ? String(body.purchase_base_url) : undefined,
+        arms: parsePricingArms(body.arms_json),
+        actor: "admin",
+        ipAddress: ip(c),
+      });
+      await writeAuditLog(db, {
+        action: "pricing_offer.campaign_create",
+        targetType: "pricing_offer_campaign",
+        targetId: result.campaign_id,
+        actor: "admin",
+        after: result,
+        ipAddress: ip(c),
+      });
+      return okOrRedirect(c, { status: "ok", ...result });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  router.post("/pricing-offer/campaigns/:id/status", async (c) => {
+    const body = await readBody(c);
+    try {
+      const status = String(body.status || "");
+      await setCampaignStatus(db, c.req.param("id"), status as "draft" | "active" | "paused" | "ended");
+      await writeAuditLog(db, {
+        action: "pricing_offer.campaign_status",
+        targetType: "pricing_offer_campaign",
+        targetId: c.req.param("id"),
+        actor: "admin",
+        after: { status },
+        ipAddress: ip(c),
+      });
+      return okOrRedirect(c, { status: "ok" });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  router.post("/pricing-offer/campaigns/:id/pool", async (c) => {
+    const body = await readBody(c);
+    try {
+      const result = await generatePool(
+        db,
+        config,
+        c.req.param("id"),
+        String(body.arm_id || ""),
+        Number(body.count || 10)
+      );
+      await writeAuditLog(db, {
+        action: "pricing_offer.pool_generate",
+        targetType: "pricing_offer_campaign",
+        targetId: c.req.param("id"),
+        actor: "admin",
+        after: { created: result.created.length, failed: result.failed.length },
+        ipAddress: ip(c),
+      });
+      return okOrRedirect(c, { status: "ok", ...result });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  router.post("/pricing-offer/campaigns/:id/codes/import", async (c) => {
+    const body = await readBody(c);
+    try {
+      const result = await importCodes(
+        db,
+        c.req.param("id"),
+        String(body.arm_id || ""),
+        String(body.codes || "")
+      );
+      await writeAuditLog(db, {
+        action: "pricing_offer.codes_import",
+        targetType: "pricing_offer_campaign",
+        targetId: c.req.param("id"),
+        actor: "admin",
+        after: result,
+        ipAddress: ip(c),
+      });
+      return okOrRedirect(c, { status: "ok", ...result });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  router.post("/pricing-offer/codes/:code/void", async (c) => {
+    try {
+      await voidCode(db, config, c.req.param("code"));
+      await writeAuditLog(db, {
+        action: "pricing_offer.code_void",
+        targetType: "pricing_offer_code",
+        targetId: c.req.param("code"),
+        actor: "admin",
+        ipAddress: ip(c),
+      });
+      return okOrRedirect(c, { status: "ok" });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  router.get("/pricing-offer/campaigns/:id/report", async (c) => {
+    try {
+      return c.json(await getReport(db, c.req.param("id")));
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  router.post("/pricing-offer/sync", async (c) => {
+    try {
+      const result = await syncRedemptions(db, config);
+      return okOrRedirect(c, { status: "ok", ...result });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
   });
 
   return router;
