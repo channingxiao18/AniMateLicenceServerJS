@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { Hono } from "hono";
 import { createTestEnv, type TestEnv } from "./helpers/setup";
+import { createV1Router } from "../src/routes/v1";
 import {
   claimPricingOffer,
   createCampaign,
@@ -286,5 +288,72 @@ describe("pricing offer service", () => {
     });
     expect(eligibility.eligible).toBe(false);
     expect(eligibility.reason).toBe("campaign_paused");
+  });
+});
+
+describe("pricing offer HTTP routes", () => {
+  async function buildApp(env: TestEnv) {
+    const app = new Hono();
+    app.route("/v1", createV1Router(env.db, env.config, env.registry, null));
+    return app;
+  }
+
+  it("serves eligibility → claim → status over HTTP", async () => {
+    const env = await createTestEnv();
+    await seedInstalledMachine(env, MACHINE);
+    await seedCampaign(env);
+    await seedOneCodePerArm(env, "cmp_test");
+    const app = await buildApp(env);
+
+    const eligibility = await app.request("/v1/pricing-offer/eligibility", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ machine_hash: MACHINE, campaign_id: "cmp_test" }),
+    });
+    expect(eligibility.status).toBe(200);
+    const eligibilityBody = (await eligibility.json()) as { eligible: boolean };
+    expect(eligibilityBody.eligible).toBe(true);
+
+    const claim = await app.request("/v1/pricing-offer/claim", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        machine_hash: MACHINE,
+        campaign_id: "cmp_test",
+        touchpoint: "feature_recall",
+        stage: "first",
+        intent_tier: 2,
+      }),
+    });
+    expect(claim.status).toBe(200);
+    const claimBody = (await claim.json()) as { status: string; code: string };
+    expect(claimBody.status).toBe("issued");
+    expect(claimBody.code).toBeTruthy();
+
+    const status = await app.request(
+      `/v1/pricing-offer/status?machine_hash=${MACHINE}&campaign_id=cmp_test`
+    );
+    expect(status.status).toBe(200);
+    const statusBody = (await status.json()) as { status: string; code: string };
+    expect(statusBody.status).toBe("issued");
+    expect(statusBody.code).toBe(claimBody.code);
+  });
+
+  it("reports campaign_paused over HTTP", async () => {
+    const env = await createTestEnv();
+    await seedInstalledMachine(env, MACHINE);
+    await seedCampaign(env);
+    await setCampaignStatus(env.db, "cmp_test", "paused");
+    const app = await buildApp(env);
+
+    const response = await app.request("/v1/pricing-offer/eligibility", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ machine_hash: MACHINE, campaign_id: "cmp_test" }),
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { eligible: boolean; reason: string };
+    expect(body.eligible).toBe(false);
+    expect(body.reason).toBe("campaign_paused");
   });
 });
