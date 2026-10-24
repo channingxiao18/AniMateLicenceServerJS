@@ -109,8 +109,12 @@ export const EVENT_NAMES = new Set([
   // as unprocessable — every other 4xx is deferred and replayed, so the event would sit
   // in the local queue (telemetry.json) forever while the same 400 repeats on each flush.
   // `storage_write_failed` fires on a transient file lock, i.e. it can happen to any install.
+  // `storage_write_recovered`: the client retried a failed save in the background and it
+  // succeeded. Paired with `storage_write_failed` it separates "no failures" from "failures
+  // masked by retries". Added 2026-10-24 (client 0.13.2).
   "storage_read_failed",
   "storage_write_failed",
+  "storage_write_recovered",
   "language_picker_shown",
   // Feature recall card (AniMate docs/plans/功能召回通用框架-实现计划-2026-10-08.md).
   // One name carries the whole funnel; `stage` (shown/accept/dismiss) splits it.
@@ -276,6 +280,7 @@ export const PRODUCT_EVENT_NAMES = [
   // EVENT_NAMES would accept the events and still report zero for them.
   "storage_read_failed",
   "storage_write_failed",
+  "storage_write_recovered",
   "language_picker_shown",
   // --- Feature recall (AniMate repo) ---
   // Listed here as well as in EVENT_NAMES: being only in EVENT_NAMES would accept
