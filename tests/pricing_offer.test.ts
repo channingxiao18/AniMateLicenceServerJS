@@ -208,12 +208,14 @@ describe("pricing offer service", () => {
     const first = await claimPricingOffer(env.db, env.config, request, "203.0.113.10");
     expect(first.status).toBe("issued");
     expect(first.code).toBeTruthy();
+    expect(first.expires_at).toBeTruthy();
     expect(first.purchase_url).toContain("code=");
     expect(first.purchase_url).toContain("claim=");
 
     const second = await claimPricingOffer(env.db, env.config, request, "203.0.113.10");
     expect(second.status).toBe("already_issued");
     expect(second.code).toBe(first.code);
+    expect(second.expires_at).toBe(first.expires_at);
 
     const assignedArm = (
       await env.db

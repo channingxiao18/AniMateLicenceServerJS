@@ -684,7 +684,8 @@ function claimResponse(
   campaign: PricingOfferCampaign,
   arm: PricingOfferArm,
   claim: PricingOfferClaim,
-  status: "issued" | "already_issued"
+  status: "issued" | "already_issued",
+  expiresAt: string | null
 ): ClaimResult {
   return {
     status,
@@ -692,13 +693,26 @@ function claimResponse(
     code: claim.code,
     arm: arm.armId,
     discount_percent: arm.discountPercent,
-    expires_at: null,
+    expires_at: expiresAt,
     purchase_url: purchaseUrl(config, campaign, {
       claimId: claim.claimId,
       code: claim.code,
       armId: arm.armId,
     }),
   };
+}
+
+async function codeExpiry(
+  db: Database,
+  code: string
+): Promise<string | null> {
+  const row = await db
+    .select({ expiresAt: pricingOfferCodes.expiresAt })
+    .from(pricingOfferCodes)
+    .where(eq(pricingOfferCodes.code, code))
+    .limit(1)
+    .get();
+  return row?.expiresAt ?? null;
 }
 
 async function existingClaim(
@@ -829,7 +843,14 @@ export async function claimPricingOffer(
 
   if (prior) {
     const arm = arms.find((candidate) => candidate.armId === prior.armId) ?? arms[0];
-    return claimResponse(config, campaign, arm, prior, "already_issued");
+    return claimResponse(
+      config,
+      campaign,
+      arm,
+      prior,
+      "already_issued",
+      await codeExpiry(db, prior.code)
+    );
   }
 
   const stats = await installStats(db, request.machineHash);
@@ -907,7 +928,14 @@ export async function claimPricingOffer(
           .run();
       }
       const winnerArm = arms.find((candidate) => candidate.armId === winner.armId) ?? arm;
-      return claimResponse(config, campaign, winnerArm, winner, "already_issued");
+      return claimResponse(
+        config,
+        campaign,
+        winnerArm,
+        winner,
+        "already_issued",
+        await codeExpiry(db, winner.code)
+      );
     }
     throw err;
   }
@@ -929,7 +957,7 @@ export async function claimPricingOffer(
     ipHash,
     createdAt: issuedAt,
   };
-  return claimResponse(config, campaign, arm, stored, "issued");
+  return claimResponse(config, campaign, arm, stored, "issued", code.expiresAt ?? null);
 }
 
 // ---------------------------------------------------------------------------
