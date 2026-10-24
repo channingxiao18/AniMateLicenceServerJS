@@ -820,11 +820,21 @@ async function createCode(
   fail("PRICING_OFFER_CODE_CREATE_FAILED", "无法创建折扣码", 502);
 }
 
+async function hashAuditIp(ipAddress: string | null): Promise<string | null> {
+  const raw = (ipAddress || "").trim();
+  if (!raw || raw === "unknown") return null;
+  const data = new TextEncoder().encode(`pricing-offer-ip-v1:${raw.toLowerCase()}`);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 export async function claimPricingOffer(
   db: Database,
   config: AppConfig,
   request: ClaimRequest,
-  ipHash: string | null
+  ipAddress: string | null
 ): Promise<ClaimResult> {
   const campaign = await resolveCampaign(db, config, request.campaignId);
   if (!campaign) return { status: "not_eligible", reason: "campaign_not_found" };
@@ -895,6 +905,7 @@ export async function claimPricingOffer(
   }
 
   const claimId = globalThis.crypto.randomUUID();
+  const ipHash = await hashAuditIp(ipAddress);
   const claim: typeof pricingOfferClaims.$inferInsert = {
     claimId,
     campaignId: campaign.campaignId,
@@ -1174,7 +1185,7 @@ export async function syncRedemptions(
         const result = await searchDiscounts(creem, {
           pageNumber: page,
           pageSize: 100,
-          createdAfter: normalizeCreatedAfter(campaign.startedAt || campaign.createdAt),
+          createdAfter: normalizeCreatedAfter(campaign.createdAt),
         });
         for (const item of result.items) {
           if (wanted.has(item.code)) byCode.set(item.code, item);

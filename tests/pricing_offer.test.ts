@@ -15,6 +15,7 @@ import {
   activations,
   entitlements,
   pricingOfferAssignments,
+  pricingOfferClaims,
   pricingOfferCodes,
   telemetryInstallProfile,
 } from "../src/db/schema";
@@ -218,6 +219,14 @@ describe("pricing offer service", () => {
     expect(second.status).toBe("already_issued");
     expect(second.code).toBe(first.code);
     expect(second.expires_at).toBe(first.expires_at);
+
+    const stored = await env.db
+      .select()
+      .from(pricingOfferClaims)
+      .where(eq(pricingOfferClaims.machineHash, MACHINE))
+      .get();
+    expect(stored?.ipHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(stored?.ipHash).not.toBe("203.0.113.10");
 
     const assignedArm = (
       await env.db
