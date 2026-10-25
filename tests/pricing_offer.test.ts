@@ -298,6 +298,32 @@ describe("pricing offer service", () => {
     expect(eligibility.eligible).toBe(false);
     expect(eligibility.reason).toBe("campaign_paused");
   });
+
+  it("never issues an expired pooled code", async () => {
+    const env = await createTestEnv();
+    await seedInstalledMachine(env, MACHINE);
+    await seedCampaign(env);
+    await seedOneCodePerArm(env, "cmp_test");
+    await env.db
+      .update(pricingOfferCodes)
+      .set({ expiresAt: "2020-01-01T00:00:00Z" })
+      .where(eq(pricingOfferCodes.campaignId, "cmp_test"))
+      .run();
+
+    const result = await claimPricingOffer(env.db, env.config, {
+      machineHash: MACHINE,
+      campaignId: "cmp_test",
+      touchpoint: "feature_recall",
+      stage: "first",
+      intentTier: 2,
+      appVersion: "0.13.2",
+      channel: "desktop",
+      locale: "zh-CN",
+      installAgeHours: 72,
+      activeDays: 3,
+    }, "203.0.113.10");
+    expect(result.status).toBe("pool_empty");
+  });
 });
 
 describe("pricing offer HTTP routes", () => {

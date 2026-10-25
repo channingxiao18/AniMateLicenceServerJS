@@ -14,7 +14,7 @@
  * "read the winner's row".
  */
 
-import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, sql } from "drizzle-orm";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/index";
 import {
@@ -748,7 +748,10 @@ async function nextAvailableCode(
         and(
           eq(pricingOfferCodes.campaignId, campaignId),
           eq(pricingOfferCodes.armId, armId),
-          eq(pricingOfferCodes.status, "available")
+          eq(pricingOfferCodes.status, "available"),
+          // A code that sat in the pool past its Creem expiry must never be
+          // issued; it would fail at checkout and look like a broken offer.
+          gt(pricingOfferCodes.expiresAt, nowIso())
         )
       )
       .orderBy(pricingOfferCodes.createdAt)
@@ -820,8 +823,26 @@ async function createCode(
   fail("PRICING_OFFER_CODE_CREATE_FAILED", "无法创建折扣码", 502);
 }
 
-async function hashAuditIp(ipAddress: string | null): Promise<string | null> {
-  const raw = (ipAddress || "").trim();
+async function allocateCode(
+  db: Database,
+  config: AppConfig,
+  campaign: PricingOfferCampaign,
+  arm: PricingOfferArm
+): Promise<PricingOfferCode | null> {
+  // A pooled code's expiry starts when it was created, not when the user claims
+  // it. For short windows ("24h") that difference breaks the promise, so prefer
+  // a fresh on-demand code and use the pool only when creation is unavailable.
+  if (config.pricingOfferAutoCreateCodes) {
+    try {
+      return await createCode(db, config, campaign, arm);
+    } catch (error) {
+      console.warn("[pricing-offer] on-demand code creation failed; using pool", error);
+    }
+  }
+  return nextAvailableCode(db, campaign.campaignId, arm.armId);
+}
+
+async function hashAuditIp(ipAddress: string | null): Promise<string | null> {  const raw = (ipAddress || "").trim();
   if (!raw || raw === "unknown") return null;
   const data = new TextEncoder().encode(`pricing-offer-ip-v1:${raw.toLowerCase()}`);
   const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
@@ -873,10 +894,7 @@ export async function claimPricingOffer(
   }
 
   const arm = await ensureAssignment(db, campaign, arms, request.machineHash);
-  let code = await nextAvailableCode(db, campaign.campaignId, arm.armId);
-  if (!code && config.pricingOfferAutoCreateCodes) {
-    code = await createCode(db, config, campaign, arm);
-  }
+  let code = await allocateCode(db, config, campaign, arm);
   if (!code) return { status: "pool_empty", reason: "pool_empty" };
 
   const issuedAt = nowIso();
@@ -897,10 +915,7 @@ export async function claimPricingOffer(
     }
     // Someone else took this code between the read and the update; pick the
     // next available one (or create one) and retry.
-    code = await nextAvailableCode(db, campaign.campaignId, arm.armId);
-    if (!code && config.pricingOfferAutoCreateCodes) {
-      code = await createCode(db, config, campaign, arm);
-    }
+    code = await allocateCode(db, config, campaign, arm);
     if (!code) return { status: "pool_empty", reason: "pool_empty" };
   }
 
