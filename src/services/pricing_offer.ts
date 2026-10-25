@@ -348,7 +348,7 @@ export async function createCampaign(
       appliesToProductsJson: JSON.stringify(appliesToProducts),
       minInstallHours: input.minInstallHours ?? 48,
       minActiveDays: input.minActiveDays ?? 2,
-      codeExpiryDays: input.codeExpiryDays ?? 14,
+      codeExpiryDays: input.codeExpiryDays ?? 7,
       priceCents: input.priceCents ?? 990,
       currency: input.currency || "USD",
       maxImpressions: input.maxImpressions ?? 2,
@@ -764,7 +764,8 @@ async function createCode(
   db: Database,
   config: AppConfig,
   campaign: PricingOfferCampaign,
-  arm: PricingOfferArm
+  arm: PricingOfferArm,
+  expiryDays: number
 ): Promise<PricingOfferCode> {
   const creem = creemConfig(config);
   const products = parseProductIds(campaign);
@@ -787,7 +788,7 @@ async function createCode(
         code,
         percentage: arm.discountPercent,
         appliesToProducts: products,
-        expiryDate: isoDaysFromNow(campaign.codeExpiryDays),
+        expiryDate: isoDaysFromNow(expiryDays),
         maxRedemptions: 1,
       });
       const row: typeof pricingOfferCodes.$inferInsert = {
@@ -796,7 +797,7 @@ async function createCode(
         armId: arm.armId,
         creemDiscountId: discount.id,
         status: "available",
-        expiresAt: discount.expiry_date ?? isoDaysFromNow(campaign.codeExpiryDays),
+        expiresAt: discount.expiry_date ?? isoDaysFromNow(expiryDays),
         redeemCount: 0,
         createdAt: nowIso(),
       };
@@ -827,14 +828,15 @@ async function allocateCode(
   db: Database,
   config: AppConfig,
   campaign: PricingOfferCampaign,
-  arm: PricingOfferArm
+  arm: PricingOfferArm,
+  expiryDays: number
 ): Promise<PricingOfferCode | null> {
   // A pooled code's expiry starts when it was created, not when the user claims
   // it. For short windows ("24h") that difference breaks the promise, so prefer
   // a fresh on-demand code and use the pool only when creation is unavailable.
   if (config.pricingOfferAutoCreateCodes) {
     try {
-      return await createCode(db, config, campaign, arm);
+      return await createCode(db, config, campaign, arm, expiryDays);
     } catch (error) {
       console.warn("[pricing-offer] on-demand code creation failed; using pool", error);
     }
@@ -894,7 +896,11 @@ export async function claimPricingOffer(
   }
 
   const arm = await ensureAssignment(db, campaign, arms, request.machineHash);
-  let code = await allocateCode(db, config, campaign, arm);
+  // T3 is a high-intent win-back: a 24h code creates urgency. T1/T2 get the
+  // campaign's broader window (recommended 7 days).
+  const expiryDays =
+    request.touchpoint === "paywall_winback" ? 1 : campaign.codeExpiryDays;
+  let code = await allocateCode(db, config, campaign, arm, expiryDays);
   if (!code) return { status: "pool_empty", reason: "pool_empty" };
 
   const issuedAt = nowIso();
@@ -915,7 +921,7 @@ export async function claimPricingOffer(
     }
     // Someone else took this code between the read and the update; pick the
     // next available one (or create one) and retry.
-    code = await allocateCode(db, config, campaign, arm);
+    code = await allocateCode(db, config, campaign, arm, expiryDays);
     if (!code) return { status: "pool_empty", reason: "pool_empty" };
   }
 
@@ -1050,7 +1056,13 @@ export async function generatePool(
   const failed: Array<{ code: string; error: string }> = [];
   for (let i = 0; i < safeCount; i += 1) {
     try {
-      const row = await createCode(db, config, detail.campaign, arm);
+      const row = await createCode(
+    db,
+    config,
+    detail.campaign,
+    arm,
+    detail.campaign.codeExpiryDays
+  );
       created.push(row.code);
     } catch (err) {
       failed.push({

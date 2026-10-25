@@ -1159,7 +1159,7 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
         <label>campaign_id（留空自动）<input name="campaign_id" placeholder="cmp_2026_10"></label>
         <label>最低安装小时<input name="min_install_hours" type="number" value="48"></label>
         <label>最低活跃天<input name="min_active_days" type="number" value="2"></label>
-        <label>券有效期（天，1 = 24h；建议 7）<input name="code_expiry_days" type="number" min="1" value="1"></label>
+        <label>券有效期（天，T3 自动 1 天；建议 7）<input name="code_expiry_days" type="number" min="1" value="7"></label>
         <label>售价（美分）<input name="price_cents" type="number" value="990"></label>
         <label>Creem 商品 ID<input name="creem_product_id" value="prod_3aAnxDU5cyTq7UlRjExEWh"></label>
         <label>购买页<input name="purchase_base_url" value="https://getanimate.app/buy"></label>
