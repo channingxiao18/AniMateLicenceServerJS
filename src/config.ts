@@ -35,6 +35,8 @@ export interface AppConfig {
   pricingOfferAutoCreateCodes: boolean;
   /** Test-only: let an otherwise licensed/paid machine exercise the offer path. */
   pricingOfferSkipLicenseCheck: boolean;
+  /** When set, the skip above applies only to this machine hash. */
+  pricingOfferSkipLicenseMachine: string;
   telemetryTokens: string;
   trialEnabled: boolean;
   trialFullFeatureDurationSeconds: number;
@@ -137,6 +139,8 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
       (env.PRICING_OFFER_AUTO_CREATE_CODES || "true").toLowerCase() !== "false",
     pricingOfferSkipLicenseCheck:
       (env.PRICING_OFFER_SKIP_LICENSE_CHECK || "false").toLowerCase() === "true",
+    pricingOfferSkipLicenseMachine:
+      (env.PRICING_OFFER_SKIP_LICENSE_MACHINE || "").trim().toLowerCase(),
     telemetryTokens:
       env.TELEMETRY_TOKENS ||
       "animate-desktop-prod-v1:desktop_prod,animate-desktop-dev:desktop_dev",

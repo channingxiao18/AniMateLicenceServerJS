@@ -407,9 +407,10 @@ export async function setCampaignStatus(
 async function isLicensed(
   db: Database,
   machineHash: string,
-  skipLicenseCheck = false
+  skipLicenseCheck = false,
+  skipMachine = ""
 ): Promise<boolean> {
-  if (skipLicenseCheck) {
+  if (skipLicenseCheck && (!skipMachine || skipMachine === machineHash.toLowerCase())) {
     console.warn("[pricing-offer] PRICING_OFFER_SKIP_LICENSE_CHECK enabled");
     return false;
   }
@@ -599,7 +600,14 @@ export async function getEligibility(
     return { ...base, eligible: false, reason: "campaign_paused" };
   }
 
-  if (await isLicensed(db, request.machineHash, config.pricingOfferSkipLicenseCheck)) {
+  if (
+    await isLicensed(
+      db,
+      request.machineHash,
+      config.pricingOfferSkipLicenseCheck,
+      config.pricingOfferSkipLicenseMachine
+    )
+  ) {
     return { ...base, eligible: false, reason: "licensed", license_state: "active" };
   }
 
@@ -870,7 +878,14 @@ export async function claimPricingOffer(
   const campaign = await resolveCampaign(db, config, request.campaignId);
   if (!campaign) return { status: "not_eligible", reason: "campaign_not_found" };
   if (campaign.status !== "active") return { status: "not_eligible", reason: "campaign_paused" };
-  if (await isLicensed(db, request.machineHash, config.pricingOfferSkipLicenseCheck)) {
+  if (
+    await isLicensed(
+      db,
+      request.machineHash,
+      config.pricingOfferSkipLicenseCheck,
+      config.pricingOfferSkipLicenseMachine
+    )
+  ) {
     return { status: "not_eligible", reason: "licensed" };
   }
 
