@@ -114,6 +114,12 @@ function errorResponse(c: any, err: unknown) {
     }
   }
 
+  // API/debug callers explicitly ask for JSON; do not turn their errors into
+  // a redirect just because the browser sent an /admin Referer.
+  if (c.req.query("format") === "json") {
+    return c.json(errorBody, statusCode as 400 | 401 | 403 | 404 | 409 | 500 | 502);
+  }
+
   // If this is a browser form submission, redirect back with error message.
   const accept = c.req.header("accept") || "";
   const referer =
