@@ -29,9 +29,6 @@ TELEMETRY_TOKENS = "animate-desktop-prod-v1-0991ed7c066d949eb026d8c5e40f3230:des
 TRIAL_ENABLED = "true"
 TRIAL_FULL_FEATURE_DURATION_SECONDS = "86400"
 TRIAL_TIME_CHECK_TOKEN = "animate-trial-time-check-v1"
-# TEST ONLY: lets an already-licensed machine exercise the coupon flow. Remove/false after testing.
-PRICING_OFFER_SKIP_LICENSE_CHECK = "true"
-PRICING_OFFER_SKIP_LICENSE_MACHINE = "08072cf2e8324312ee31de6f2e07d2f2fdefb2cf5989d7f7225d69b018344087"
 # ─── Model catalog (Lever 1, 2026-09-29) ─────────────────────────────────
 # Random sample models for trial machines. Objects live in R2; the client
 # downloads via presigned URLs. Keep CATALOG_ENABLED=false until models are
