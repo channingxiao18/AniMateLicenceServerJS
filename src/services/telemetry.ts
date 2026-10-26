@@ -438,6 +438,11 @@ export function parseTelemetryTokens(config: AppConfig): Map<string, string> {
   return map;
 }
 
+/** Shared app token check for non-telemetry endpoints that should not be open scanners. */
+export function isTelemetryTokenValid(config: AppConfig, token: string | null): boolean {
+  return Boolean(token && parseTelemetryTokens(config).has(token));
+}
+
 export async function recordTelemetryEvent(
   db: Database,
   config: AppConfig,

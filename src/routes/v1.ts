@@ -17,7 +17,7 @@ import { createRateLimiter } from "../middleware/rate_limit";
 import type { ActivateRateLimiter } from "../services/rate_limit";
 import { getAesKey, aesDecrypt } from "../crypto/aes";
 import { parseLicenceOuter, parseLicenceInner } from "../licence/codec";
-import { recordTelemetryEvent, TelemetryError } from "../services/telemetry";
+import { isTelemetryTokenValid, recordTelemetryEvent, TelemetryError } from "../services/telemetry";
 import { startTrial } from "../services/trial";
 import { issueTrialLlmProfile } from "../services/llm_trial";
 import {
@@ -209,6 +209,20 @@ export function createV1Router(
     errorCode: "TRIAL_LLM_RATE_LIMITED",
     message: "请求过于频繁，请稍后再试",
   });
+  const pricingReadLimiter = createRateLimiter(
+    { ...limiterConfig, ipMax: 120, ipWindowSeconds: 60 },
+    {
+      errorCode: "PRICING_OFFER_RATE_LIMITED",
+      message: "请求过于频繁，请稍后再试",
+    }
+  );
+  const pricingClaimLimiter = createRateLimiter(
+    { ...limiterConfig, ipMax: 10, ipWindowSeconds: 3600 },
+    {
+      errorCode: "PRICING_OFFER_RATE_LIMITED",
+      message: "请求过于频繁，请稍后再试",
+    }
+  );
 
   router.use("/activate", rateLimiter);
   router.use("/refresh", rateLimiter);
@@ -219,6 +233,9 @@ export function createV1Router(
   router.use("/llm/trial-profile", llmTrialRateLimiter);
   router.use("/models/catalog/claim", catalogRateLimiter);
   router.use("/models/catalog/report", catalogRateLimiter);
+  router.use("/pricing-offer/eligibility", pricingReadLimiter);
+  router.use("/pricing-offer/status", pricingReadLimiter);
+  router.use("/pricing-offer/claim", pricingClaimLimiter);
 
   router.post("/telemetry", async (c) => {
     try {
@@ -684,6 +701,9 @@ export function createV1Router(
   // what makes the per-arm denominator a cohort instead of the self-selected
   // claimants. Claim is idempotent and returns the same code on retry.
   router.post("/pricing-offer/eligibility", async (c) => {
+    if (!isTelemetryTokenValid(config, c.req.header("x-animate-telemetry-token") || null)) {
+      return c.json({ error: "UNAUTHORIZED", message: "缺少有效的客户端凭证" }, 401);
+    }
     let body: unknown;
     try {
       body = await c.req.json();
@@ -705,6 +725,9 @@ export function createV1Router(
   });
 
   router.post("/pricing-offer/claim", async (c) => {
+    if (!isTelemetryTokenValid(config, c.req.header("x-animate-telemetry-token") || null)) {
+      return c.json({ error: "UNAUTHORIZED", message: "缺少有效的客户端凭证" }, 401);
+    }
     let body: unknown;
     try {
       body = await c.req.json();
@@ -726,6 +749,9 @@ export function createV1Router(
   });
 
   router.get("/pricing-offer/status", async (c) => {
+    if (!isTelemetryTokenValid(config, c.req.header("x-animate-telemetry-token") || null)) {
+      return c.json({ error: "UNAUTHORIZED", message: "缺少有效的客户端凭证" }, 401);
+    }
     try {
       const request = validateEligibilityBody({
         machine_hash: c.req.query("machine_hash") || "",

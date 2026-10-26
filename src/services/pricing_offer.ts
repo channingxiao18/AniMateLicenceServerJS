@@ -1340,6 +1340,19 @@ export async function getReport(
     .groupBy(pricingOfferClaims.touchpoint)
     .all();
 
+  // Per-arm × touchpoint claims: the global `touchpoints` map cannot answer
+  // "which arm converts best in T1 vs T2 vs T3".
+  const touchpointArms = await db
+    .select({
+      armId: pricingOfferClaims.armId,
+      touchpoint: pricingOfferClaims.touchpoint,
+      n: sql<number>`count(*)`,
+    })
+    .from(pricingOfferClaims)
+    .where(eq(pricingOfferClaims.campaignId, campaignId))
+    .groupBy(pricingOfferClaims.armId, pricingOfferClaims.touchpoint)
+    .all();
+
   const shownRow = await db
     .select({ n: sql<number>`count(distinct ${telemetryEvents.machineHash})` })
     .from(telemetryEvents)
@@ -1351,6 +1364,22 @@ export async function getReport(
       )
     )
     .get();
+
+  const shownTouchpoints = await db
+    .select({
+      touchpoint: sql<string>`json_extract(${telemetryEvents.payloadJson}, '$.touchpoint')`,
+      n: sql<number>`count(distinct ${telemetryEvents.machineHash})`,
+    })
+    .from(telemetryEvents)
+    .where(
+      and(
+        eq(telemetryEvents.event, "pricing_offer_shown"),
+        gte(telemetryEvents.receivedAt, campaign.startedAt || campaign.createdAt),
+        sql`json_extract(${telemetryEvents.payloadJson}, '$.campaign_id') = ${campaignId}`
+      )
+    )
+    .groupBy(sql`json_extract(${telemetryEvents.payloadJson}, '$.touchpoint')`)
+    .all();
 
   return {
     campaign: {
@@ -1366,6 +1395,14 @@ export async function getReport(
     },
     arms: reports,
     touchpoints: Object.fromEntries(touchpoints.map((row) => [row.touchpoint, Number(row.n)])),
+    touchpoint_arms: touchpointArms.map((row) => ({
+      arm_id: row.armId,
+      touchpoint: row.touchpoint,
+      claimed: Number(row.n),
+    })),
     shown_machines: Number(shownRow?.n ?? 0),
+    shown_machines_by_touchpoint: Object.fromEntries(
+      shownTouchpoints.map((row) => [row.touchpoint ?? "unknown", Number(row.n)])
+    ),
   };
 }

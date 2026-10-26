@@ -277,12 +277,20 @@ describe("pricing offer service", () => {
     const report = (await getReport(env.db, "cmp_test")) as {
       arms: Array<{ claimed: number; redeemed: number; eligible: number }>;
       touchpoints: Record<string, number>;
+      touchpoint_arms: Array<{ arm_id: string; touchpoint: string; claimed: number }>;
+      shown_machines_by_touchpoint: Record<string, number>;
     };
     const totalClaimed = report.arms.reduce((sum, arm) => sum + arm.claimed, 0);
     const totalRedeemed = report.arms.reduce((sum, arm) => sum + arm.redeemed, 0);
     expect(totalClaimed).toBe(1);
     expect(totalRedeemed).toBe(1);
     expect(report.touchpoints.review_window).toBe(1);
+    expect(report.touchpoint_arms).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ touchpoint: "review_window", claimed: 1 }),
+      ])
+    );
+    expect(report.shown_machines_by_touchpoint).toEqual({});
   });
 
   it("honours the campaign kill switch", async () => {
@@ -342,7 +350,10 @@ describe("pricing offer HTTP routes", () => {
 
     const eligibility = await app.request("/v1/pricing-offer/eligibility", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-animate-telemetry-token": "animate-desktop-dev",
+      },
       body: JSON.stringify({ machine_hash: MACHINE, campaign_id: "cmp_test" }),
     });
     expect(eligibility.status).toBe(200);
@@ -351,7 +362,10 @@ describe("pricing offer HTTP routes", () => {
 
     const claim = await app.request("/v1/pricing-offer/claim", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-animate-telemetry-token": "animate-desktop-dev",
+      },
       body: JSON.stringify({
         machine_hash: MACHINE,
         campaign_id: "cmp_test",
@@ -366,7 +380,10 @@ describe("pricing offer HTTP routes", () => {
     expect(claimBody.code).toBeTruthy();
 
     const status = await app.request(
-      `/v1/pricing-offer/status?machine_hash=${MACHINE}&campaign_id=cmp_test`
+      `/v1/pricing-offer/status?machine_hash=${MACHINE}&campaign_id=cmp_test`,
+      {
+        headers: { "x-animate-telemetry-token": "animate-desktop-dev" },
+      }
     );
     expect(status.status).toBe(200);
     const statusBody = (await status.json()) as { status: string; code: string };
@@ -383,12 +400,26 @@ describe("pricing offer HTTP routes", () => {
 
     const response = await app.request("/v1/pricing-offer/eligibility", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-animate-telemetry-token": "animate-desktop-dev",
+      },
       body: JSON.stringify({ machine_hash: MACHINE, campaign_id: "cmp_test" }),
     });
     expect(response.status).toBe(200);
     const body = (await response.json()) as { eligible: boolean; reason: string };
     expect(body.eligible).toBe(false);
     expect(body.reason).toBe("campaign_paused");
+  });
+
+  it("rejects pricing requests without the client token", async () => {
+    const env = await createTestEnv();
+    const app = await buildApp(env);
+    const response = await app.request("/v1/pricing-offer/eligibility", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ machine_hash: MACHINE }),
+    });
+    expect(response.status).toBe(401);
   });
 });
