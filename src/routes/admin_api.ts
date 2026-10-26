@@ -204,6 +204,9 @@ function parsePricingArms(raw: unknown): Array<{ label: string; discountPercent:
 }
 
 function okOrRedirect(c: any, payload: Record<string, unknown>) {
+  if (c.req.query("format") === "json") {
+    return c.json(payload);
+  }
   const accept = c.req.header("accept") || "";
   if (accept.includes("text/html")) {
     const referer = c.req.header("referer") || "/admin/";
