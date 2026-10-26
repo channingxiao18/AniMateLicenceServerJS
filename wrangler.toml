@@ -12,7 +12,7 @@ database_name = "animate-licence-db"
 database_id = "e2c38144-73ff-4f84-b1b9-4d859db796ec"
 
 [vars]
-CREEM_TEST_MODE = "true"
+CREEM_TEST_MODE = "false"
 CREEM_DEFAULT_PLAN_ID = "animate-companion-lifetime-basic-v1"
 ADMIN_USERNAME = "admin"
 CORS_ORIGINS = "http://localhost:1420,http://127.0.0.1:1420,https://tauri.localhost,tauri://localhost"
