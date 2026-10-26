@@ -324,7 +324,7 @@ export async function createDiscount(
   config: CreemConfig,
   input: CreateDiscountInput
 ): Promise<CreemDiscount> {
-  return creemFetch<CreemDiscount>(config, "POST", "/v1/discounts", {
+  return creemFetch<CreemDiscount>(config, "POST", "/discounts", {
     name: input.name,
     code: input.code,
     type: "percentage",
@@ -347,7 +347,7 @@ export async function searchDiscounts(
   return creemFetch<DiscountSearchResult>(
     config,
     "GET",
-    `/v1/discounts/search?${params.toString()}`
+    `/discounts/search?${params.toString()}`
   );
 }
 
@@ -359,7 +359,7 @@ export async function getDiscountByCode(
   const result = await creemFetch<CreemDiscount | { items?: CreemDiscount[] }>(
     config,
     "GET",
-    `/v1/discounts?${params.toString()}`
+    `/discounts?${params.toString()}`
   );
   if (result && Array.isArray((result as { items?: CreemDiscount[] }).items)) {
     return (result as { items: CreemDiscount[] }).items[0] ?? null;
@@ -371,7 +371,7 @@ export async function deleteDiscount(config: CreemConfig, discountId: string): P
   await creemFetch<void>(
     config,
     "DELETE",
-    `/v1/discounts/${encodeURIComponent(discountId)}/delete`
+    `/discounts/${encodeURIComponent(discountId)}/delete`
   );
 }
 
