@@ -33,6 +33,8 @@ export interface AppConfig {
   pricingOfferPoolLowWatermark: number;
   pricingOfferPurchaseBaseUrl: string;
   pricingOfferAutoCreateCodes: boolean;
+  /** Test-only: let an otherwise licensed/paid machine exercise the offer path. */
+  pricingOfferSkipLicenseCheck: boolean;
   telemetryTokens: string;
   trialEnabled: boolean;
   trialFullFeatureDurationSeconds: number;
@@ -133,6 +135,8 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
       env.PRICING_OFFER_PURCHASE_BASE_URL || "https://getanimate.app/buy",
     pricingOfferAutoCreateCodes:
       (env.PRICING_OFFER_AUTO_CREATE_CODES || "true").toLowerCase() !== "false",
+    pricingOfferSkipLicenseCheck:
+      (env.PRICING_OFFER_SKIP_LICENSE_CHECK || "false").toLowerCase() === "true",
     telemetryTokens:
       env.TELEMETRY_TOKENS ||
       "animate-desktop-prod-v1:desktop_prod,animate-desktop-dev:desktop_dev",

@@ -570,6 +570,7 @@ export function createTestConfig(rsaPrivateKeyPkcs8Hex: string): AppConfig {
     pricingOfferPoolLowWatermark: 20,
     pricingOfferPurchaseBaseUrl: "https://getanimate.app/buy",
     pricingOfferAutoCreateCodes: false,
+    pricingOfferSkipLicenseCheck: false,
     telemetryTokens: "animate-desktop-prod-v1:desktop_prod,animate-desktop-dev:desktop_dev",
     trialEnabled: true,
     trialFullFeatureDurationSeconds: 86400,
