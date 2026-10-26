@@ -1072,6 +1072,13 @@ export async function generatePool(
       break;
     }
   }
+  if (created.length === 0 && failed.length > 0) {
+    fail(
+      "CREEM_DISCOUNT_FAILED",
+      `Creem 建码失败: ${failed[0].error}`,
+      502
+    );
+  }
   return { created, failed };
 }
 
