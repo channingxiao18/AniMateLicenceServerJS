@@ -40,6 +40,13 @@ export function windowRange(
 }
 
 export function statements(from: string, to: string, tomorrow: string, cycle: string): string[] {
+  // 事件扫描下界（比 from 早一天，兜住 t0-3600 的容差）。写成字面量而不是
+  // datetime('...','-1 day')：SQLite 只有拿到字面量常量才会把 received_at 当
+  // 索引区间下推，否则会退化成全表扫描（实测 1.29M → 约 260k 行读）。
+  const scanFrom = new Date(Date.parse(`${from}T00:00:00Z`) - DAY_MS)
+    .toISOString()
+    .slice(0, 19)
+    .replace("T", " ");
   return [
     // ① 画像
     `DELETE FROM telemetry_install_profile WHERE install_day >= '${from}' AND install_day <= '${to}';`,
@@ -71,9 +78,10 @@ export function statements(from: string, to: string, tomorrow: string, cycle: st
          MAX(CASE WHEN e.event='trial_llm_turn_used'
                    OR (e.event='chat_reply_received' AND json_extract(e.payload_json,'$.mode')='live')
                   THEN 1 ELSE 0 END) AS f_ai
-       FROM telemetry_events e JOIN inst i ON i.install_id = e.install_id
-       WHERE e.product_id='animate'
-         AND e.sent_at BETWEEN i.t0 - 3600 AND i.t0 + 604800
+       FROM telemetry_events e INDEXED BY telemetry_events_received_idx
+       JOIN inst i ON i.install_id = e.install_id
+       WHERE e.received_at >= '${scanFrom}' AND e.received_at < '${tomorrow}'
+         AND e.received_at_unix BETWEEN i.t0 - 3600 AND i.t0 + 604800
        GROUP BY e.install_id
      )
      SELECT i.install_id, i.machine_hash, i.install_at, substr(i.install_at,1,10), i.ver,
@@ -100,7 +108,7 @@ export function statements(from: string, to: string, tomorrow: string, cycle: st
             SUM(CASE WHEN event='purchase_clicked' THEN 1 ELSE 0 END),
             SUM(CASE WHEN event='checkout_opened' THEN 1 ELSE 0 END),
             SUM(CASE WHEN event='license_reminder_shown' THEN 1 ELSE 0 END)
-     FROM telemetry_events
+     FROM telemetry_events INDEXED BY telemetry_events_received_idx
      WHERE product_id='animate' AND install_id IS NOT NULL
        AND received_at >= '${from}' AND received_at < '${tomorrow}'
      GROUP BY install_id, day;`,

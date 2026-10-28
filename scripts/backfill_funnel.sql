@@ -1,9 +1,11 @@
 -- backfill_funnel.sql —— 一次性回填（只读 telemetry_events，只写 3 张新表）
 --
+-- 参数：:from / :to / :tomorrow / :scan_from（= from 前一天 00:00:00）。
 -- 预算控制（重要）：
 --   * 三条语句各自只扫一遍窗口内的事件，**不做 N+1**；
---   * 先在 :from / :to 里收窄（建议一次回填 90 天，约 6~8 万行读）；
---   * 全量重跑单次实测 1~2 秒 / 33 万行；日常只跑「最近 7 天」增量。
+--   * 事件扫描必须走 `received_at` 索引区间（脚本里用 :scan_from + INDEXED BY），
+--     否则 SQLite 会退化成全表扫描（实测 1.29M 行读 / 单次 8s）；
+--   * 全量重跑单次实测 1~2 秒 / 33 万行；日常只跑「最近 10 天」增量（约 26 万行读）。
 --
 -- 执行顺序：先 1) profile，再 2) day，最后 3) 快照（快照从 profile 聚合，不扫事件）。
 
@@ -47,9 +49,10 @@ ev AS (
     MAX(CASE WHEN e.event='trial_llm_turn_used'
               OR (e.event='chat_reply_received' AND json_extract(e.payload_json,'$.mode')='live')
              THEN 1 ELSE 0 END) AS f_ai
-  FROM telemetry_events e JOIN inst i ON i.install_id = e.install_id
-  WHERE e.product_id='animate'
-    AND e.sent_at BETWEEN i.t0 - 3600 AND i.t0 + 604800
+  FROM telemetry_events e INDEXED BY telemetry_events_received_idx
+  JOIN inst i ON i.install_id = e.install_id
+  WHERE e.received_at >= :scan_from AND e.received_at < :tomorrow
+    AND e.received_at_unix BETWEEN i.t0 - 3600 AND i.t0 + 604800
   GROUP BY e.install_id
 )
 SELECT i.install_id, i.machine_hash, i.install_at, substr(i.install_at,1,10), i.ver,
@@ -84,7 +87,7 @@ SELECT install_id,
        SUM(CASE WHEN event='purchase_clicked' THEN 1 ELSE 0 END),
        SUM(CASE WHEN event='checkout_opened' THEN 1 ELSE 0 END),
        SUM(CASE WHEN event='license_reminder_shown' THEN 1 ELSE 0 END)
-FROM telemetry_events
+FROM telemetry_events INDEXED BY telemetry_events_received_idx
 WHERE product_id='animate' AND install_id IS NOT NULL
   AND received_at >= :from AND received_at < :tomorrow
 GROUP BY install_id, day;
