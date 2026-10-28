@@ -888,10 +888,13 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
         <td class="num-cell muted">${unc === null ? "—" : unc.toLocaleString()}</td></tr>`;
     }).join("");
     const pageCount = Math.max(1, Math.ceil(users.total / users.pageSize));
-    const content = `<div class="report-shell">
+    const content = `${flash(c)}<div class="report-shell">
       <div class="report-head"><div><h2>用户转化路径</h2>
         <p class="muted">口径 path_v1 · 窗口 S0–S3/S6 取首 72h、S4–S5/S7 取首 7 天 · cohort ${days === 0 ? "全部历史" : e(report.filters.from)} ~ ${e(report.filters.to)} · 已满窗 ${t.s0.toLocaleString()} 台</p></div>
-        <div class="range-switch">${[[0, "全部"], [7, "7天"], [30, "30天"], [90, "90天"], [180, "180天"]].map(([d, label]) => `<a class="${days === Number(d) ? "active" : ""}" href="${qs({ days: Number(d), page: 1 })}">${label}</a>`).join("")}</div></div>
+        <div class="actions" style="gap:10px;align-items:center">
+          <div class="range-switch">${[[0, "全部"], [7, "7天"], [30, "30天"], [90, "90天"], [180, "180天"]].map(([d, label]) => `<a class="${days === Number(d) ? "active" : ""}" href="${qs({ days: Number(d), page: 1 })}">${label}</a>`).join("")}</div>
+          <form method="post" action="/admin/api/funnel/rebuild" title="重算最近 10 天（平时每天 UTC 00:10 / 北京 08:10 自动跑一次）"><button class="btn">立即重建</button></form>
+        </div></div>
       <div class="metric-strip">
         <div class="metric"><div class="metric-label">新增安装</div><div class="metric-value">${t.s0.toLocaleString()}</div></div>
         <div class="metric"><div class="metric-label">正常启动</div><div class="metric-value">${r.s1}%</div></div>

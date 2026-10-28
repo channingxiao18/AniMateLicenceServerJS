@@ -115,7 +115,7 @@ async function initApp(env: Env): Promise<Hono> {
   });
 
   app.use("/admin/api/*", authMiddleware(config));
-  app.route("/admin/api", createAdminApiRouter(db, config, registry));
+  app.route("/admin/api", createAdminApiRouter(db, config, registry, env));
   app.route("/admin", createAdminUiRouter(db, config));
 
   app.notFound((c) => c.json({ error: "NOT_FOUND", message: "端点不存在" }, 404));

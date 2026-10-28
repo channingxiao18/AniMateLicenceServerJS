@@ -1,8 +1,52 @@
 import { describe, expect, it } from "vitest";
+import { Hono } from "hono";
 import { compareVersions, stageRates, type FunnelTotals, type FunnelVersionRow } from "../src/services/funnel";
 import { windowRange } from "../src/services/funnel_jobs";
+import { createAdminApiRouter } from "../src/routes/admin_api";
+import { createTestEnv } from "./helpers/setup";
 
 const day = (offset: number) => new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+
+describe("POST /admin/api/funnel/rebuild", () => {
+  it("跑与 cron 相同的语句，并回传窗口", async () => {
+    const env = await createTestEnv();
+    const seen: string[] = [];
+    const stubEnv = {
+      DB: {
+        exec: async (sql: string) => {
+          seen.push(sql);
+          return {};
+        },
+      },
+    } as unknown as Parameters<typeof createAdminApiRouter>[3];
+    const app = new Hono();
+    app.route("/admin/api", createAdminApiRouter(env.db, env.config, env.registry, stubEnv));
+
+    const res = await app.request("/admin/api/funnel/rebuild?format=json", { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string; from: string; to: string; statements: number };
+    expect(body.status).toBe("ok");
+    expect(body.to).toBe(day(0));
+    expect(body.statements).toBe(seen.length);
+    expect(body.statements).toBeGreaterThanOrEqual(8);
+  });
+
+  it("没有 Worker env 时明确拒绝，而不是假装成功", async () => {
+    const env = await createTestEnv();
+    const app = new Hono();
+    app.route("/admin/api", createAdminApiRouter(env.db, env.config, env.registry));
+    const res = await app.request("/admin/api/funnel/rebuild?format=json", { method: "POST" });
+    expect(res.status).toBe(503);
+  });
+
+  it("拒绝越界的 lookback", async () => {
+    const env = await createTestEnv();
+    const app = new Hono();
+    app.route("/admin/api", createAdminApiRouter(env.db, env.config, env.registry, { DB: { exec: async () => ({}) } } as never));
+    const res = await app.request("/admin/api/funnel/rebuild?format=json&lookback=999", { method: "POST" });
+    expect(res.status).toBe(400);
+  });
+});
 
 describe("windowRange", () => {
   it("窗口以今天结尾，并覆盖到漏斗页最新可展示的 cohort（today-7）", () => {

@@ -57,6 +57,8 @@ import {
 } from "../services/pricing_offer";
 
 import type { ProviderRegistry } from "../services/provider";
+import { runFunnelBackfill } from "../services/funnel_jobs";
+import type { Env } from "../index";
 
 function ip(c: { req: { header(name: string): string | undefined } }): string {
   return c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
@@ -223,8 +225,46 @@ function okOrRedirect(c: any, payload: Record<string, unknown>) {
   return c.json(payload);
 }
 
-export function createAdminApiRouter(db: Database, config: AppConfig, registry: ProviderRegistry): Hono {
+export function createAdminApiRouter(
+  db: Database,
+  config: AppConfig,
+  registry: ProviderRegistry,
+  /**
+   * Worker bindings. Only needed for operations that run raw SQL through
+   * `env.DB` (currently the funnel rebuild). Tests may omit it; the route then
+   * answers 503 instead of silently doing nothing.
+   */
+  env?: Env
+): Hono {
   const router = new Hono();
+
+  // 手动触发漏斗重算：与每日 cron 跑同一段 SQL（runFunnelBackfill）。
+  // 后台页面「立即重建」按钮 POST 到这里；也可 curl -X POST ...?format=json。
+  router.post("/funnel/rebuild", async (c) => {
+    if (!env) {
+      return c.json({ error: "UNAVAILABLE", message: "缺少 Worker env 绑定" }, 503);
+    }
+    const rawLookback = c.req.query("lookback");
+    const lookback = rawLookback === undefined || rawLookback === "" ? undefined : Number(rawLookback);
+    if (lookback !== undefined && (!Number.isInteger(lookback) || lookback < 1 || lookback > 90)) {
+      return c.json({ error: "INVALID_LOOKBACK", message: "lookback 需为 1~90 的整数" }, 400);
+    }
+    const wantsHtml = (c.req.header("accept") || "").includes("text/html") && c.req.query("format") !== "json";
+    try {
+      const result = await runFunnelBackfill(env, lookback);
+      if (!wantsHtml) return c.json({ status: "ok", ...result });
+      const url = new URL(c.req.header("referer") || "/admin/telemetry/funnel", "http://localhost");
+      url.searchParams.set("success", `已重算 ${result.from} ~ ${result.to}（${result.statements} 条语句）`);
+      return c.redirect(url.pathname + url.search);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[funnel] manual rebuild failed:", message);
+      if (!wantsHtml) return c.json({ error: "REBUILD_FAILED", message }, 500);
+      const url = new URL(c.req.header("referer") || "/admin/telemetry/funnel", "http://localhost");
+      url.searchParams.set("error", `重算失败：${message}`);
+      return c.redirect(url.pathname + url.search);
+    }
+  });
 
   router.post("/products", async (c) => {
     const body = await readBody(c);
