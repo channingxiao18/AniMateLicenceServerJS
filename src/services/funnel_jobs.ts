@@ -87,7 +87,7 @@ export function statements(from: string, to: string, tomorrow: string, cycle: st
     `INSERT OR REPLACE INTO telemetry_install_day (install_id, day, events, sessions, span_secs,
        dance_n, import_click_n, import_ok_n, real_ai_n, msg_real_n, chat_err_n,
        purchase_click_n, checkout_n, reminder_shown_n)
-     SELECT install_id, substr(datetime(sent_at,'unixepoch'),1,10), COUNT(*),
+     SELECT install_id, substr(received_at,1,10) AS day, COUNT(*),
             COUNT(DISTINCT session_id), MAX(sent_at)-MIN(sent_at),
             SUM(CASE WHEN event='dance_started' THEN 1 ELSE 0 END),
             SUM(CASE WHEN event='model_import_clicked' THEN 1 ELSE 0 END),
