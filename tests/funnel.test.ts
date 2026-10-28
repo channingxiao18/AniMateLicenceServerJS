@@ -1,5 +1,30 @@
 import { describe, expect, it } from "vitest";
 import { compareVersions, stageRates, type FunnelTotals, type FunnelVersionRow } from "../src/services/funnel";
+import { windowRange } from "../src/services/funnel_jobs";
+
+const day = (offset: number) => new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+
+describe("windowRange", () => {
+  it("窗口以今天结尾，并覆盖到漏斗页最新可展示的 cohort（today-7）", () => {
+    const { from, to, tomorrow } = windowRange();
+    expect(to).toBe(day(0));
+    expect(from).toBe(day(-10));
+    // 页面只展示 install_day <= today-7，窗口必须把它包含进来
+    expect(from <= day(-7)).toBe(true);
+    expect(tomorrow).toBe(day(1));
+  });
+
+  it("旧实现停在 today-7（把 WINDOW_DAYS 用了两次），导致累积中的 cohort 从不刷新", () => {
+    const { to } = windowRange();
+    expect(to).not.toBe(day(-7));
+  });
+
+  it("接受自定义回看天数", () => {
+    const { from, to } = windowRange(3);
+    expect(to).toBe(day(0));
+    expect(from).toBe(day(-3));
+  });
+});
 
 const base: FunnelTotals = {
   s0: 1000, s1: 960, s2: 640, s3: 340, s4: 300, s5: 220, s6: 160, s7: 20,

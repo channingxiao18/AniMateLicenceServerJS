@@ -1,5 +1,10 @@
 /**
- * 每晚定时重算：把「最近 7 天」的新装重新投影到 install_profile / install_day。
+ * 定时重算：把最近 N 天的新装重新投影到 install_profile / install_day。
+ *
+ * 窗口 = `[今天 - REBUILD_LOOKBACK_DAYS, 今天]`（含今天这批还在累积的 cohort）。
+ * 漏斗页只展示「7 天旅程已满窗」（`install_day <= 今天-7`）的 cohort，而一个
+ * cohort 的 7×24h 窗口要到 `install_day + 8` 才真正关闭，所以 10 天回看能保证
+ * 每个可展示的 cohort 在满窗之后至少被重算 3 次，迟到上报与激活都能补进去。
  *
  * 约束：
  *  - 只读写三张投影表，绝不写 telemetry_events；
@@ -9,20 +14,32 @@
 import type { Env } from "../index";
 
 const DAY_MS = 86_400_000;
+/** 旅程窗口：漏斗页按首 7 天统计（与 services/funnel.ts 的 WINDOW_DAYS 一致）。 */
 const WINDOW_DAYS = 7;
+/** 重算窗口天数。见文件头：需 ≥ 8，留 10 天余量。 */
+const REBUILD_LOOKBACK_DAYS = 10;
 
 function dayString(offsetDays: number): string {
   return new Date(Date.now() + offsetDays * DAY_MS).toISOString().slice(0, 10);
 }
 
-function windowRange(lookbackDays: number): { from: string; to: string; tomorrow: string } {
-  const to = dayString(-WINDOW_DAYS);
-  const from = dayString(-(WINDOW_DAYS + lookbackDays - 1));
+/**
+ * 重算窗口：`[今天 - lookbackDays, 今天]`。
+ *
+ * 旧实现是 `[今天-13, 今天-7]`（把 WINDOW_DAYS 用了两次），于是正在累积的
+ * `[今天-7, 今天]` 从来没被刷新过，而每个 cohort 只在安装后第 7~13 天被重算，
+ * 之后永久冻结（`built_at` 恰好等于 `install_day + 13`）。
+ */
+export function windowRange(
+  lookbackDays: number = REBUILD_LOOKBACK_DAYS
+): { from: string; to: string; tomorrow: string } {
+  const to = dayString(0);
+  const from = dayString(-lookbackDays);
   const tomorrow = new Date(Date.parse(`${to}T00:00:00Z`) + DAY_MS).toISOString().slice(0, 10);
   return { from, to, tomorrow };
 }
 
-function statements(from: string, to: string, tomorrow: string, cycle: string): string[] {
+export function statements(from: string, to: string, tomorrow: string, cycle: string): string[] {
   return [
     // ① 画像
     `DELETE FROM telemetry_install_profile WHERE install_day >= '${from}' AND install_day <= '${to}';`,
@@ -135,8 +152,11 @@ function statements(from: string, to: string, tomorrow: string, cycle: string): 
   ];
 }
 
-/** 定时任务入口：重算最近 7 天（默认 lookback=7，即最近 14 天的 cohort）。 */
-export async function runFunnelBackfill(env: Env, lookbackDays = 7): Promise<{ from: string; to: string; statements: number }> {
+/** 定时任务入口：重算 `[今天 - lookbackDays, 今天]`（默认 10 天）。 */
+export async function runFunnelBackfill(
+  env: Env,
+  lookbackDays = REBUILD_LOOKBACK_DAYS
+): Promise<{ from: string; to: string; statements: number }> {
   const { from, to, tomorrow } = windowRange(lookbackDays);
   const cycle = new Date().toISOString().slice(0, 10);
   const stmts = statements(from, to, tomorrow, cycle);

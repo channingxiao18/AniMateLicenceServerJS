@@ -152,7 +152,7 @@ function addCors(response: Response): Response {
 export default {
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(
-      runFunnelBackfill(env, 7).then(
+      runFunnelBackfill(env).then(
         (r) => console.log(`[funnel] backfill ${r.from}~${r.to} ok (${r.statements} stmts)`),
         (err) => console.error(`[funnel] backfill failed: ${err instanceof Error ? err.stack : String(err)}`),
       ),

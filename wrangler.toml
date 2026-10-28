@@ -56,6 +56,10 @@ CATALOG_R2_ENDPOINT = "https://efc49b431fd7c1b183fa8a45e7cbd06b.r2.cloudflaresto
 binding = "CATALOG"
 bucket_name = "animate-model-catalog"
 
-# Daily 03:10 UTC: recompute the last 7 days of funnel projection
+# Hourly at :05 UTC: recompute the last 10 days of funnel projection.
+# A cohort's 7-day journey closes on install_day+8 and the funnel page only shows
+# completed cohorts (install_day <= today-7), so hourly keeps both the still-open
+# cohorts and the just-completed ones fresh. Dial to "7 */3 * * *" (every 3h) or
+# "10 0 * * *" (daily 08:10 Beijing) if the D1 read cost matters.
 [triggers]
-crons = ["10 3 * * *"]
+crons = ["5 * * * *"]
