@@ -404,6 +404,15 @@ export async function setCampaignStatus(
 // Assignment / eligibility
 // ---------------------------------------------------------------------------
 
+/**
+ * How long a client-reported `license_state='active'` keeps a machine excluded.
+ *
+ * Eligibility runs ~10 minutes after launch and telemetry flushes every 30 s,
+ * so the current session's state is normally already ingested; the window only
+ * exists to cover offline queues and late retries.
+ */
+const LICENCE_STATE_FALLBACK_DAYS = 14;
+
 async function isLicensed(
   db: Database,
   machineHash: string
@@ -414,7 +423,28 @@ async function isLicensed(
     .where(and(eq(activations.telemetryMachineHash, machineHash), eq(activations.status, "active")))
     .limit(1)
     .get();
-  return Boolean(row);
+  if (row) return true;
+
+  // Legacy activations (manual keys issued before the client started sending the
+  // telemetry token) have `telemetry_machine_hash = NULL`, so the join above
+  // misses paid machines entirely and they get coupon prompts. The client
+  // already reports its own verified licence state on every telemetry event, so
+  // the most recent `license_state` is the only identifier those rows have — and
+  // it is the same evidence the client's own fail-safe uses before closing the
+  // window. The window keeps untrusted/stale rows from suppressing forever.
+  // See docs/reports/折扣码0.13.4-运行核查-2026-10-28.md §4.1.
+  const since = new Date(Date.now() - LICENCE_STATE_FALLBACK_DAYS * 86_400_000)
+    .toISOString()
+    .replace("T", " ")
+    .slice(0, 19);
+  const latest = await db
+    .select({ licenseState: telemetryEvents.licenseState })
+    .from(telemetryEvents)
+    .where(and(eq(telemetryEvents.machineHash, machineHash), gte(telemetryEvents.receivedAt, since)))
+    .orderBy(desc(telemetryEvents.receivedAt))
+    .limit(1)
+    .get();
+  return latest?.licenseState === "active";
 }
 
 interface InstallStats {

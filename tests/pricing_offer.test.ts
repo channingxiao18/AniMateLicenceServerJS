@@ -17,6 +17,7 @@ import {
   pricingOfferAssignments,
   pricingOfferClaims,
   pricingOfferCodes,
+  telemetryEvents,
   telemetryInstallProfile,
 } from "../src/db/schema";
 import { eq } from "drizzle-orm";
@@ -188,6 +189,124 @@ describe("pricing offer service", () => {
     );
     expect(claim.status).toBe("not_eligible");
     expect(claim.reason).toBe("licensed");
+  });
+
+  it("keeps legacy paid machines out when the activation has no telemetry hash", async () => {
+    // Regression: activations created before the client sent the telemetry token
+    // (and manual Taobao keys) keep telemetry_machine_hash = NULL, so the
+    // activation join missed them and paid customers received coupon prompts —
+    // one machine was re-prompted every 30 minutes for 9.5 hours.
+    // See docs/reports/折扣码0.13.4-运行核查-2026-10-28.md §4.1.
+    const env = await createTestEnv();
+    await seedInstalledMachine(env, MACHINE);
+    await seedCampaign(env);
+    await env.db
+      .insert(entitlements)
+      .values({
+        id: 1,
+        productId: "animate",
+        planId: "animate-companion-lifetime-basic-v1",
+        status: "active",
+        sourceProvider: "manual",
+        sourceChannel: "manual",
+      })
+      .run();
+    await env.db
+      .insert(activations)
+      .values({
+        entitlementId: 1,
+        fingerprint: "fp_legacy",
+        status: "active",
+        telemetryMachineHash: null,
+      })
+      .run();
+    await env.db
+      .insert(telemetryEvents)
+      .values({
+        eventId: "c0000007-0000-4000-8000-000000000001",
+        schemaVersion: 1,
+        event: "session_heartbeat",
+        sourceId: "desktop_prod",
+        receivedAt: new Date().toISOString().replace("T", " ").slice(0, 19),
+        receivedAtUnix: Math.floor(Date.now() / 1000),
+        productId: "animate",
+        appVersion: "0.13.4",
+        platform: "windows",
+        channel: "official",
+        machineHash: MACHINE,
+        installId: `inst_${MACHINE.slice(0, 8)}`,
+        licenseState: "active",
+        payloadJson: "{}",
+        rawJson: "{}",
+      })
+      .run();
+
+    const eligibility = await getEligibility(env.db, env.config, {
+      machineHash: MACHINE,
+      campaignId: "cmp_test",
+    });
+    expect(eligibility.eligible).toBe(false);
+    expect(eligibility.reason).toBe("licensed");
+    expect(eligibility.license_state).toBe("active");
+
+    const claim = await claimPricingOffer(
+      env.db,
+      env.config,
+      {
+        campaignId: "cmp_test",
+        machineHash: MACHINE,
+        touchpoint: "feature_recall",
+        stage: "first",
+        appVersion: "0.13.4",
+        channel: "microsoft_store",
+        locale: "zh-CN",
+        intentTier: 3,
+        installAgeHours: 72,
+        activeDays: 3,
+      },
+      "203.0.113.10"
+    );
+    expect(claim.status).toBe("not_eligible");
+    expect(claim.reason).toBe("licensed");
+  });
+
+  it("does not treat stale telemetry as an active licence forever", async () => {
+    // A refunded / deactivated machine must become eligible again once its
+    // reported state ages out; the fallback is a window, not a permanent stamp.
+    const env = await createTestEnv();
+    await seedInstalledMachine(env, MACHINE);
+    await seedCampaign(env);
+    const stale = new Date(Date.now() - 30 * 86_400_000)
+      .toISOString()
+      .replace("T", " ")
+      .slice(0, 19);
+    await env.db
+      .insert(telemetryEvents)
+      .values({
+        eventId: "c0000007-0000-4000-8000-000000000002",
+        schemaVersion: 1,
+        event: "session_heartbeat",
+        sourceId: "desktop_prod",
+        receivedAt: stale,
+        receivedAtUnix: Math.floor(Date.parse(`${stale.replace(" ", "T")}Z`) / 1000),
+        productId: "animate",
+        appVersion: "0.13.4",
+        platform: "windows",
+        channel: "official",
+        machineHash: MACHINE,
+        installId: `inst_${MACHINE.slice(0, 8)}`,
+        licenseState: "active",
+        payloadJson: "{}",
+        rawJson: "{}",
+      })
+      .run();
+
+    const eligibility = await getEligibility(env.db, env.config, {
+      machineHash: MACHINE,
+      campaignId: "cmp_test",
+    });
+    expect(eligibility.eligible).toBe(true);
+    expect(eligibility.reason).toBe("ok");
   });
 
   it("issues a code once and returns the same code on retry", async () => {
