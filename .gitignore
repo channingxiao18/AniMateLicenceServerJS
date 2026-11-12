@@ -8,3 +8,9 @@ keys/
 .env.local
 .wrangler/
 analysis/
+
+# Catalog seed 的模型二进制与缩略图：本地暂存，由 scripts/catalog_upload.mjs 传到 R2。
+# manifest.json 仍入库（与 mdl_fafamu / mdl_vera 一致），只有大文件不进版本库。
+# 缩略图扩展名不固定（jpg/png/webp），按整类忽略，避免新增型号时漏挡。
+scripts/catalog/seed/**/*.vrm
+scripts/catalog/seed/**/thumb.*
