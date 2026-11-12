@@ -28,6 +28,7 @@ import { getCampaign, getReport, listCampaigns, listCodes } from "../services/pr
 import {
   getActivityDays,
   getInstallationDays,
+  getPurchaseFunnelDays,
   getProductAnalyticsReport,
   getTelemetryMachineUsage,
   getTelemetryReport,
@@ -99,6 +100,7 @@ const navItems = [
   ["/admin/subscriptions", "订阅"],
   ["/admin/providers", "支付映射"],
   ["/admin/telemetry/installs", "新增安装"],
+  ["/admin/telemetry/purchase", "购买入口转化"],
   ["/admin/telemetry/funnel", "用户转化路径"],
   ["/admin/telemetry/activity", "活跃设备"],
   ["/admin/telemetry/startup", "启动诊断"],
@@ -185,6 +187,7 @@ function validReportDay(value: string | undefined): string {
 function reportTabs(active: string): string {
   const tabs = [
     ["/admin/telemetry/installs", "新增安装"],
+    ["/admin/telemetry/purchase", "购买入口转化"],
     ["/admin/telemetry/activity", "活跃设备"],
     ["/admin/telemetry/startup", "启动诊断"],
     ["/admin/telemetry/retention", "留存分析"],
@@ -953,6 +956,18 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     const rows = result.items.map((row) => `<tr><td class="identity"><a class="day-link" href="/admin/telemetry/install/${encodeURIComponent(row.installId)}?product_id=${encodeURIComponent(productId)}">${e(shortId(row.installId))}</a></td><td>${e(row.firstInstalledAt)}</td><td>${actionFlag(row.freeModelClicked)}</td><td>${actionFlag(row.modelUploadSucceeded)}</td><td>${actionFlag(row.purchaseClicked)}</td><td>${e(row.appVersion)}</td><td>${e(row.platform)}</td><td>${e(row.channel)}</td><td>${badge(row.licenseState)}</td><td class="identity">${e(shortId(row.machineHash))}</td></tr>`).join("");
     const content = `${reportTabs("/admin/telemetry/installs")}<div class="report-head"><div><a class="day-link" href="/admin/telemetry/installs">← 返回每日新增</a><h2 style="margin-top:10px">${e(day)} 新增用户</h2><p class="muted">首次安装当天的匿名用户行为明细，同一行为只标记一次</p></div></div><section class="report-section"><table><thead><tr><th>安装用户 ID</th><th>首次上报</th><th>获取免费模型</th><th>上传模型成功</th><th>去购买</th><th>版本</th><th>平台</th><th>渠道</th><th>授权状态</th><th>机器 Hash</th></tr></thead><tbody>${rows || `<tr><td colspan="10" class="muted">当天暂无新增安装</td></tr>`}</tbody></table>${devicePagination(`/admin/telemetry/installs/${day}`, { product_id: productId }, result.page, result.pageSize, result.total)}</section>`;
     return c.html(shell("安装设备明细", "/admin/telemetry/installs", `<div class="report-shell">${content}</div>`));
+  });
+
+  router.get("/telemetry/purchase", async (c) => {
+    const days = Number(c.req.query("days") || 14);
+    const productId = c.req.query("product_id") || "animate";
+    const report = await getPurchaseFunnelDays(db, { days, productId });
+    const today = report.days[0] || { shownDevices: 0, clickedDevices: 0, clickRatePct: null };
+    const pct = (value: number | null) => (value === null ? `<span class="muted">—</span>` : `${value}%`);
+    const rows = report.days.map((row) => `<tr><td><span class="day-link">${e(row.day)}</span></td><td class="number-cell">${row.shownDevices}</td><td class="number-cell">${row.clickedDevices}</td><td class="number-cell">${pct(row.clickRatePct)}</td></tr>`).join("");
+    const surfaceRows = report.surfaces.map((row) => `<tr><td>${e(row.surface)}</td><td class="number-cell">${row.shownDevices}</td><td class="number-cell">${row.clickedDevices}</td><td class="number-cell">${pct(row.clickRatePct)}</td></tr>`).join("");
+    const content = `${reportTabs("/admin/telemetry/purchase")}<div class="report-head"><div><h2>购买入口转化</h2><p class="muted">分母是当天看到购买入口的设备（不限新装），分子是当天点了「去购买」的设备；均按安装设备 ID 去重</p></div>${rangeSwitch("/admin/telemetry/purchase", report.filters.days, productId)}</div><div class="metric-strip"><div class="metric"><div class="metric-label">今日曝光设备</div><div class="metric-value">${today.shownDevices.toLocaleString()}</div></div><div class="metric"><div class="metric-label">今日点击设备</div><div class="metric-value">${today.clickedDevices.toLocaleString()}</div></div><div class="metric"><div class="metric-label">今日点击率</div><div class="metric-value">${pct(today.clickRatePct)}</div></div><div class="metric"><div class="metric-label">周期点击率</div><div class="metric-value">${pct(report.totals.clickRatePct)}</div></div></div><section class="report-section"><div class="section-head"><h3>按日曝光 / 点击</h3><span>曝光为 0 而点击为 0：当天没有上报该事件的客户端</span></div><table><thead><tr><th>日期</th><th>曝光设备</th><th>点击设备</th><th>点击率</th></tr></thead><tbody>${rows}</tbody></table></section><section class="report-section"><div class="section-head"><h3>按入口拆分</h3><span>周期内累计</span></div><table><thead><tr><th>入口</th><th>曝光设备</th><th>点击设备</th><th>点击率</th></tr></thead><tbody>${surfaceRows || `<tr><td colspan="4" class="muted">所选周期内没有曝光数据</td></tr>`}</tbody></table></section><p class="muted" style="font-size:12px">${e(report.note)}</p>`;
+    return c.html(shell("购买入口转化", "/admin/telemetry/purchase", `<div class="report-shell">${content}</div>`));
   });
 
   router.get("/telemetry/activity", async (c) => {

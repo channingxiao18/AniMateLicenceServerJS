@@ -47,6 +47,9 @@ export const EVENT_NAMES = new Set([
   "free_asr_credits_clicked",
   "free_tts_credits_clicked",
   "purchase_clicked",
+  // 购买入口曝光。和 purchase_clicked 配对算「看到购买入口 → 点击」转化率；
+  // 只有点击数时，曝光面变化与转化率变化在数据上无法区分。
+  "purchase_surface_shown",
   "checkout_opened",
   "purchase_failed",
   "license_reminder_shown",
@@ -214,6 +217,9 @@ export const PRODUCT_EVENT_NAMES = [
   "free_asr_credits_clicked",
   "free_tts_credits_clicked",
   "purchase_clicked",
+  // 与 purchase_clicked 配对：分母是"当天看到购买入口的设备"，分子是"当天点了的"。
+  // 必须同时进 PRODUCT_EVENT_NAMES，否则只入库、报表侧读不到（见上方注释的三个读者）。
+  "purchase_surface_shown",
   "checkout_opened",
   "purchase_failed",
   "license_reminder_shown",
@@ -1960,6 +1966,160 @@ async function getInstallationDaysUncached(
   };
 }
 
+/**
+ * 每日「购买入口曝光 → 点击」漏斗。
+ *
+ * 与「新增安装」页的区别：那一页的分母是**当天首次安装的用户**，只回答"新用户有没有
+ * 点购买"；这个报表的分母是**当天看到购买入口的任何设备**（老用户、已过期用户都算），
+ * 所以它能回答"购买入口整体有多少人看、多少人点"，也能看出某个 surface 的转化率是否异常。
+ *
+ * 两个事件都按 (install_id) 去重成设备数：同一台机器一天开三次设置页只算一次曝光，
+ * 点三次购买也只算一次点击 —— 否则重复打开会稀释转化率。
+ *
+ * 不需要改库：两个事件都落在既有的 telemetry_events 表里，`purchase_surface_shown` 走
+ * (product_id, event, received_at) 索引；payload 里的 surface 用 json_extract 读。
+ */
+export async function getPurchaseFunnelDays(
+  db: Database,
+  params: { days?: number; productId?: string } = {}
+) {
+  const days = reportDays(params.days, 14);
+  const productId = params.productId || "animate";
+  return cachedReport(`purchase-funnel:${productId}:${days}`, () =>
+    getPurchaseFunnelDaysUncached(db, { days, productId })
+  );
+}
+
+type PurchaseFunnelDay = {
+  day: string;
+  shownDevices: number;
+  clickedDevices: number;
+  /** 点击 / 曝光，百分比保留一位小数；曝光为 0 时是 null（不是 0%）。 */
+  clickRatePct: number | null;
+};
+
+type PurchaseFunnelSurface = {
+  surface: string;
+  shownDevices: number;
+  clickedDevices: number;
+  clickRatePct: number | null;
+};
+
+async function getPurchaseFunnelDaysUncached(
+  db: Database,
+  params: { days: number; productId: string }
+) {
+  const { days, productId } = params;
+  const start = daysAgo(days - 1);
+  const today = daysAgo(0);
+
+  const conditions = [
+    eq(telemetryEvents.productId, productId),
+    inArray(telemetryEvents.event, ["purchase_surface_shown", "purchase_clicked"]),
+    gte(telemetryEvents.receivedAt, `${start} 00:00:00`),
+    lte(telemetryEvents.receivedAt, `${today} 23:59:59`),
+    isNotNull(telemetryEvents.installId),
+  ];
+
+  // 一条聚合 SQL 出全部结果：每个 (day, surface, event) 一行去重设备数。
+  // install_id 为 NULL 的行已被排除 —— 没有安装身份就无法去重设备，硬算会把
+  // 同一台设备重复计入分母。
+  const rows = await db
+    .select({
+      day: sql<string>`substr(${telemetryEvents.receivedAt}, 1, 10)`,
+      surface: sql<string>`COALESCE(json_extract(${telemetryEvents.payloadJson}, '$.surface'), 'unknown')`,
+      event: telemetryEvents.event,
+      devices: sql<number>`COUNT(DISTINCT ${telemetryEvents.installId})`,
+    })
+    .from(telemetryEvents)
+    .where(and(...conditions))
+    .groupBy(
+      sql`substr(${telemetryEvents.receivedAt}, 1, 10)`,
+      sql`COALESCE(json_extract(${telemetryEvents.payloadJson}, '$.surface'), 'unknown')`,
+      telemetryEvents.event
+    )
+    .all();
+
+  // 按 surface 的口径：一台设备当天在同一 surface 只算一次，所以这里可以直接用
+  // COUNT(DISTINCT install_id) 的结果。
+  const bySurface = new Map<string, { shown: number; clicked: number }>();
+  for (const row of rows) {
+    const devices = Number(row.devices || 0);
+    if (!devices) continue;
+    const bucket = bySurface.get(row.surface) || { shown: 0, clicked: 0 };
+    if (row.event === "purchase_surface_shown") bucket.shown += devices;
+    else bucket.clicked += devices;
+    bySurface.set(row.surface, bucket);
+  }
+
+  // 按天的口径必须换一次去重：同一台设备当天可能在多个 surface 看到入口，把上面
+  // 各 surface 的设备数相加会把它数两次。所以再查一遍「按 (day, event) 去重的设备」。
+  // 这一条只多一次索引扫描，换的是日漏斗里不会再出现"点击率 > 100%"这种读数。
+  const dayRowsRaw = await db
+    .select({
+      day: sql<string>`substr(${telemetryEvents.receivedAt}, 1, 10)`,
+      event: telemetryEvents.event,
+      devices: sql<number>`COUNT(DISTINCT ${telemetryEvents.installId})`,
+    })
+    .from(telemetryEvents)
+    .where(and(...conditions))
+    .groupBy(sql`substr(${telemetryEvents.receivedAt}, 1, 10)`, telemetryEvents.event)
+    .all();
+
+  const byDay = new Map<string, { shown: number; clicked: number }>();
+  for (const row of dayRowsRaw) {
+    const devices = Number(row.devices || 0);
+    if (!devices) continue;
+    const bucket = byDay.get(row.day) || { shown: 0, clicked: 0 };
+    if (row.event === "purchase_surface_shown") bucket.shown += devices;
+    else bucket.clicked += devices;
+    byDay.set(row.day, bucket);
+  }
+
+  const rate = (numerator: number, denominator: number) =>
+    denominator ? Math.round((numerator / denominator) * 1000) / 10 : null;
+
+  const dayRows: PurchaseFunnelDay[] = Array.from({ length: days }, (_, index) => {
+    const day = daysAgo(index);
+    const bucket = byDay.get(day) || { shown: 0, clicked: 0 };
+    return {
+      day,
+      shownDevices: bucket.shown,
+      clickedDevices: bucket.clicked,
+      clickRatePct: rate(bucket.clicked, bucket.shown),
+    };
+  });
+
+  const surfaceRows: PurchaseFunnelSurface[] = Array.from(bySurface.entries())
+    .map(([surface, bucket]) => ({
+      surface,
+      shownDevices: bucket.shown,
+      clickedDevices: bucket.clicked,
+      clickRatePct: rate(bucket.clicked, bucket.shown),
+    }))
+    .sort((a, b) => b.shownDevices - a.shownDevices);
+
+  const totals = dayRows.reduce(
+    (acc, row) => ({
+      shownDevices: acc.shownDevices + row.shownDevices,
+      clickedDevices: acc.clickedDevices + row.clickedDevices,
+    }),
+    { shownDevices: 0, clickedDevices: 0 }
+  );
+
+  return {
+    filters: { days, productId },
+    totals: { ...totals, clickRatePct: rate(totals.clickedDevices, totals.shownDevices) },
+    days: dayRows,
+    surfaces: surfaceRows,
+    // 显式告诉调用方这套口径的边界：老版本客户端（< 0.14.3）只发 purchase_clicked，
+    // 不发 purchase_surface_shown，所以曝光为 0 而点击 > 0 的日子说明的是版本覆盖不足，
+    // 不是"点了但没看到"。
+    note:
+      "曝光仅统计上报了 purchase_surface_shown 的客户端；点击为 0 且曝光为 0 的日期通常意味着当天没有该版本以上的活跃设备。",
+  };
+}
+
 export async function listInstallationsForDay(
   db: Database,
   params: { day: string; productId?: string; page?: number; pageSize?: number }
@@ -2008,6 +2168,7 @@ const NEW_INSTALLATION_ACTION_EVENTS = [
   "free_model_guide_clicked",
   "model_import_completed",
   "purchase_clicked",
+  "purchase_surface_shown",
 ] as const;
 
 function emptyNewInstallationActions(): NewInstallationActions {
@@ -2114,8 +2275,7 @@ async function loadInstallations(
 export async function getActivityDays(
   db: Database,
   params: { days?: number; productId?: string } = {}
-) {
-  const days = reportDays(params.days);
+) {  const days = reportDays(params.days);
   const productId = params.productId || "animate";
   return cachedReport(`activity:${productId}:${days}`, () =>
     getActivityDaysUncached(db, { days, productId })
