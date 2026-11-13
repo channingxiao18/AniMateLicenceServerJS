@@ -1,20 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { Hono } from "hono";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { createSession, SESSION_COOKIE } from "../src/middleware/auth";
 import { createAdminUiRouter } from "../src/routes/admin_ui";
 import {
   createCampaign,
   getCampaign,
   importCodes,
+  pricingOfferShownWhere,
   setCampaignStatus,
 } from "../src/services/pricing_offer";
 import {
   pricingOfferAssignments,
   pricingOfferClaims,
   pricingOfferCodes,
+  telemetryEvents,
 } from "../src/db/schema";
-import { createTestEnv } from "./helpers/setup";
+import { createTestDb, createTestEnv } from "./helpers/setup";
 
 const MACHINE = "a".repeat(64);
 
@@ -109,5 +111,37 @@ describe("pricing offer admin pages", () => {
       headers: { cookie },
     });
     expect(response.status).toBe(404);
+  });
+
+  /**
+   * 回归：活动详情页曾经 500。
+   *
+   * 「多少台机器看到过」的两条查询漏了 product_id，而 telemetry_events 只有
+   * (product_id, event, received_at) 这个索引 —— 线上 67 万行时每次全表扫 11.6 秒，
+   * 两条叠加直接触发 D1 的 10 秒窗口限流，页面返回 {"error":"SERVER_ERROR"}。
+   * 这里直接断言查询计划，比断言 SQL 文本更贴近真正的原因。
+   */
+  it("scopes the shown-machines scan to the product_id index", async () => {
+    const { db, sqlite } = createTestDb();
+    const where = pricingOfferShownWhere(
+      {
+        productId: "animate",
+        startedAt: "2026-10-26 04:46:01",
+        createdAt: "2026-10-26 04:43:04",
+      },
+      "cmp_ui"
+    );
+    const query = db
+      .select({ n: sql`count(distinct ${telemetryEvents.machineHash})` })
+      .from(telemetryEvents)
+      .where(where);
+    const compiled = query.toSQL();
+    const plan = sqlite
+      .prepare(`EXPLAIN QUERY PLAN ${compiled.sql}`)
+      .all(...(compiled.params as unknown[])) as Array<{ detail: string }>;
+    const details = plan.map((row) => row.detail).join("\n");
+
+    expect(details).toContain("telemetry_events_product_event_idx");
+    expect(details).not.toContain("SCAN telemetry_events");
   });
 });

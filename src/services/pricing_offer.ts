@@ -1305,6 +1305,27 @@ export interface ArmReport {
   revenue_per_eligible_cents: number | null;
 }
 
+/**
+ * 「有多少台机器看到了这个活动」的过滤条件。
+ *
+ * 必须带 `product_id`：telemetry_events 上唯一的可用索引是
+ * (product_id, event, received_at)，缺了最左列 SQLite 只能全表扫。线上表已到 67 万行，
+ * 这两个查询各扫一遍要 11.6 秒，叠在一起直接触发 D1 的 "Too many resources consumed
+ * within a 10 second window"，把活动详情页打成 500 SERVER_ERROR。
+ * 2026-11-13 修：加上 product_id 后同一个查询从 674,219 行降到 359 行、11.6s → 5ms。
+ */
+export function pricingOfferShownWhere(
+  campaign: Pick<PricingOfferCampaign, "productId" | "startedAt" | "createdAt">,
+  campaignId: string
+) {
+  return and(
+    eq(telemetryEvents.productId, campaign.productId),
+    eq(telemetryEvents.event, "pricing_offer_shown"),
+    gte(telemetryEvents.receivedAt, campaign.startedAt || campaign.createdAt),
+    sql`json_extract(${telemetryEvents.payloadJson}, '$.campaign_id') = ${campaignId}`
+  );
+}
+
 export async function getReport(
   db: Database,
   campaignId: string
@@ -1312,6 +1333,7 @@ export async function getReport(
   const detail = await getCampaign(db, campaignId);
   if (!detail) fail("CAMPAIGN_NOT_FOUND", "活动不存在", 404);
   const { campaign, arms } = detail;
+  const shownWhere = pricingOfferShownWhere(campaign, campaignId);
 
   const reports: ArmReport[] = [];
   for (const arm of arms) {
@@ -1396,13 +1418,7 @@ export async function getReport(
   const shownRow = await db
     .select({ n: sql<number>`count(distinct ${telemetryEvents.machineHash})` })
     .from(telemetryEvents)
-    .where(
-      and(
-        eq(telemetryEvents.event, "pricing_offer_shown"),
-        gte(telemetryEvents.receivedAt, campaign.startedAt || campaign.createdAt),
-        sql`json_extract(${telemetryEvents.payloadJson}, '$.campaign_id') = ${campaignId}`
-      )
-    )
+    .where(shownWhere)
     .get();
 
   const shownTouchpoints = await db
@@ -1411,13 +1427,7 @@ export async function getReport(
       n: sql<number>`count(distinct ${telemetryEvents.machineHash})`,
     })
     .from(telemetryEvents)
-    .where(
-      and(
-        eq(telemetryEvents.event, "pricing_offer_shown"),
-        gte(telemetryEvents.receivedAt, campaign.startedAt || campaign.createdAt),
-        sql`json_extract(${telemetryEvents.payloadJson}, '$.campaign_id') = ${campaignId}`
-      )
-    )
+    .where(shownWhere)
     .groupBy(sql`json_extract(${telemetryEvents.payloadJson}, '$.touchpoint')`)
     .all();
 
