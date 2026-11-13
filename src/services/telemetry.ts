@@ -1973,11 +1973,24 @@ async function getInstallationDaysUncached(
  * 点购买"；这个报表的分母是**当天看到购买入口的任何设备**（老用户、已过期用户都算），
  * 所以它能回答"购买入口整体有多少人看、多少人点"，也能看出某个 surface 的转化率是否异常。
  *
- * 两个事件都按 (install_id) 去重成设备数：同一台机器一天开三次设置页只算一次曝光，
- * 点三次购买也只算一次点击 —— 否则重复打开会稀释转化率。
+ * 四个口径在同一条语句里一起算，各自去重、互不推导：
+ *   day          按天对 install_id 去重（跨入口去重）—— 日表的「合计」列。
+ *   period       周期内对 install_id 去重 —— 顶部指标卡和周期合计。
+ *   surface_day  (day, surface) 去重 —— 同一台设备当天看两个入口，合计只算 1 台，
+ *                但两个入口各算 1 台。
+ *   surface      周期内 (surface) 去重 —— 这台设备这一周点了 5 次，入口列只算 1 台。
  *
- * 不需要改库：两个事件都落在既有的 telemetry_events 表里，`purchase_surface_shown` 走
- * (product_id, event, received_at) 索引；payload 里的 surface 用 json_extract 读。
+ * 所以「合计」和「各入口相加」天然不相等，而且这是对的：一台设备当天既看 settings 又看
+ * license_prompt，合计 1 台、两个入口各 1 台。旧实现把各入口的「设备·日」相加当周期合计，
+ * 于是同样 14 天，日表加起来 152、入口表加起来 161 —— 两张表对不上就是这个原因。
+ * 同理日表的行也不能直接相加当周期数（那是「设备·日」），周期合计由 period 单独去重。
+ *
+ * 计数口径：
+ *   - 「设备」永远是对 install_id 去重后的台数（点十次也只算 1 台）。
+ *   - 「次数」是事件条数（点十次就是 10），和「设备」并排显示，不再用设备数冒充次数。
+ *
+ * 不需要改库：两个事件都落在既有的 telemetry_events 表里，走
+ * (product_id, event, received_at) 索引区间；payload 里的 surface 用 json_extract 读。
  */
 export async function getPurchaseFunnelDays(
   db: Database,
@@ -1990,19 +2003,42 @@ export async function getPurchaseFunnelDays(
   );
 }
 
-type PurchaseFunnelDay = {
+type PurchaseSurfaceCell = {
+  shownDevices: number;
+  clickedDevices: number;
+  /** 点击事件条数（不是设备数）：同一台设备一天点两次就是 2。 */
+  clickEvents: number;
+};
+
+export type PurchaseFunnelDay = {
   day: string;
   shownDevices: number;
   clickedDevices: number;
-  /** 点击 / 曝光，百分比保留一位小数；曝光为 0 时是 null（不是 0%）。 */
+  /** 点击设备里「当天就是本机首装日」的台数。 */
+  newClickedDevices: number;
+  /** 其余点击设备（首装日更早，或查不到首装日）。与 newClickedDevices 相加 = clickedDevices。 */
+  existingClickedDevices: number;
+  clickEvents: number;
+  /** 点击设备 / 曝光设备，百分比保留一位小数；曝光为 0 时是 null（不是 0%）。 */
+  clickRatePct: number | null;
+  /** 按入口拆的同日数字。各入口相加 >= 上面的合计（同一设备当天看了多个入口）。 */
+  surfaces: Record<string, PurchaseSurfaceCell>;
+};
+
+export type PurchaseFunnelSurface = PurchaseSurfaceCell & {
+  surface: string;
   clickRatePct: number | null;
 };
 
-type PurchaseFunnelSurface = {
-  surface: string;
-  shownDevices: number;
-  clickedDevices: number;
-  clickRatePct: number | null;
+type PurchaseFunnelScope = "day" | "surface_day" | "surface" | "period";
+
+type PurchaseFunnelRow = {
+  scope: PurchaseFunnelScope;
+  day: string | null;
+  surface: string | null;
+  event: string;
+  devices: number;
+  events: number;
 };
 
 async function getPurchaseFunnelDaysUncached(
@@ -2011,112 +2047,216 @@ async function getPurchaseFunnelDaysUncached(
 ) {
   const { days, productId } = params;
   const start = daysAgo(days - 1);
-  const today = daysAgo(0);
+  const end = daysAgo(0);
 
-  const conditions = [
-    eq(telemetryEvents.productId, productId),
-    inArray(telemetryEvents.event, ["purchase_surface_shown", "purchase_clicked"]),
-    gte(telemetryEvents.receivedAt, `${start} 00:00:00`),
-    lte(telemetryEvents.receivedAt, `${today} 23:59:59`),
-    isNotNull(telemetryEvents.installId),
-  ];
-
-  // 一条聚合 SQL 出全部结果：每个 (day, surface, event) 一行去重设备数。
-  // install_id 为 NULL 的行已被排除 —— 没有安装身份就无法去重设备，硬算会把
-  // 同一台设备重复计入分母。
-  const rows = await db
-    .select({
-      day: sql<string>`substr(${telemetryEvents.receivedAt}, 1, 10)`,
-      surface: sql<string>`COALESCE(json_extract(${telemetryEvents.payloadJson}, '$.surface'), 'unknown')`,
-      event: telemetryEvents.event,
-      devices: sql<number>`COUNT(DISTINCT ${telemetryEvents.installId})`,
-    })
-    .from(telemetryEvents)
-    .where(and(...conditions))
-    .groupBy(
-      sql`substr(${telemetryEvents.receivedAt}, 1, 10)`,
-      sql`COALESCE(json_extract(${telemetryEvents.payloadJson}, '$.surface'), 'unknown')`,
-      telemetryEvents.event
+  // 一条语句、一次索引区间扫描（WITH 被引用多次，SQLite 只物化一遍），四个粒度一起取回，
+  // 不再像旧实现那样把同一段区间扫两遍。install_id 为 NULL 的行必须排除 —— 没有安装身份
+  // 就无法去重设备，硬算会把同一台设备重复计入分母。
+  const rows = (await db.all(sql`
+    WITH scoped AS (
+      SELECT
+        substr(received_at, 1, 10) AS day,
+        event,
+        COALESCE(json_extract(payload_json, '$.surface'), 'unknown') AS surface,
+        install_id
+      FROM telemetry_events
+      WHERE product_id = ${productId}
+        AND event IN ('purchase_surface_shown', 'purchase_clicked')
+        AND received_at >= ${`${start} 00:00:00`}
+        AND received_at <= ${`${end} 23:59:59`}
+        AND install_id IS NOT NULL
     )
-    .all();
-
-  // 按 surface 的口径：一台设备当天在同一 surface 只算一次，所以这里可以直接用
-  // COUNT(DISTINCT install_id) 的结果。
-  const bySurface = new Map<string, { shown: number; clicked: number }>();
-  for (const row of rows) {
-    const devices = Number(row.devices || 0);
-    if (!devices) continue;
-    const bucket = bySurface.get(row.surface) || { shown: 0, clicked: 0 };
-    if (row.event === "purchase_surface_shown") bucket.shown += devices;
-    else bucket.clicked += devices;
-    bySurface.set(row.surface, bucket);
-  }
-
-  // 按天的口径必须换一次去重：同一台设备当天可能在多个 surface 看到入口，把上面
-  // 各 surface 的设备数相加会把它数两次。所以再查一遍「按 (day, event) 去重的设备」。
-  // 这一条只多一次索引扫描，换的是日漏斗里不会再出现"点击率 > 100%"这种读数。
-  const dayRowsRaw = await db
-    .select({
-      day: sql<string>`substr(${telemetryEvents.receivedAt}, 1, 10)`,
-      event: telemetryEvents.event,
-      devices: sql<number>`COUNT(DISTINCT ${telemetryEvents.installId})`,
-    })
-    .from(telemetryEvents)
-    .where(and(...conditions))
-    .groupBy(sql`substr(${telemetryEvents.receivedAt}, 1, 10)`, telemetryEvents.event)
-    .all();
-
-  const byDay = new Map<string, { shown: number; clicked: number }>();
-  for (const row of dayRowsRaw) {
-    const devices = Number(row.devices || 0);
-    if (!devices) continue;
-    const bucket = byDay.get(row.day) || { shown: 0, clicked: 0 };
-    if (row.event === "purchase_surface_shown") bucket.shown += devices;
-    else bucket.clicked += devices;
-    byDay.set(row.day, bucket);
-  }
+    SELECT 'day' AS scope, day, '' AS surface, event,
+           COUNT(DISTINCT install_id) AS devices, COUNT(*) AS events
+    FROM scoped GROUP BY day, event
+    UNION ALL
+    SELECT 'surface_day', day, surface, event, COUNT(DISTINCT install_id), COUNT(*)
+    FROM scoped GROUP BY day, surface, event
+    UNION ALL
+    SELECT 'surface', NULL, surface, event, COUNT(DISTINCT install_id), COUNT(*)
+    FROM scoped GROUP BY surface, event
+    UNION ALL
+    SELECT 'period', NULL, NULL, event, COUNT(DISTINCT install_id), COUNT(*)
+    FROM scoped GROUP BY event
+  `)) as unknown as PurchaseFunnelRow[];
 
   const rate = (numerator: number, denominator: number) =>
     denominator ? Math.round((numerator / denominator) * 1000) / 10 : null;
 
-  const dayRows: PurchaseFunnelDay[] = Array.from({ length: days }, (_, index) => {
-    const day = daysAgo(index);
-    const bucket = byDay.get(day) || { shown: 0, clicked: 0 };
-    return {
-      day,
-      shownDevices: bucket.shown,
-      clickedDevices: bucket.clicked,
-      clickRatePct: rate(bucket.clicked, bucket.shown),
-    };
+  /**
+   * 「当天点击设备里有多少台是当天首装」。
+   *
+   * 首装日取 telemetry_daily_uniques 里的 install_seen(day, install_id)：这条记录在入库时
+   * 就写了，而 telemetry_install_profile 是夜间重建的，当天新装要等第二天才进档 —— 用后者
+   * 会让「今天」这一行的新装永远是 0。
+   * EXISTS 正好命中该表的四列主键 (day, product_id, unique_type, unique_value)，
+   * 实测 464 行读 / 2.4ms；写成 join 派生表会退化成 8 万行读。
+   */
+  const sameDayInstallRows = (await db.all(sql`
+    SELECT substr(e.received_at, 1, 10) AS day,
+           COUNT(DISTINCT e.install_id) AS devices
+    FROM telemetry_events e
+    WHERE e.product_id = ${productId}
+      AND e.event = 'purchase_clicked'
+      AND e.received_at >= ${`${start} 00:00:00`}
+      AND e.received_at <= ${`${end} 23:59:59`}
+      AND e.install_id IS NOT NULL
+      AND EXISTS (
+        SELECT 1 FROM telemetry_daily_uniques u
+        WHERE u.day = substr(e.received_at, 1, 10)
+          AND u.product_id = ${productId}
+          AND u.unique_type = 'install_seen'
+          AND u.unique_value = e.install_id
+      )
+    GROUP BY day
+  `)) as unknown as Array<{ day: string; devices: number }>;
+
+  const newByDay = new Map<string, number>();
+  for (const row of sameDayInstallRows) {
+    newByDay.set(String(row.day), Number(row.devices || 0));
+  }
+
+  const emptyCell = (): PurchaseSurfaceCell => ({
+    shownDevices: 0,
+    clickedDevices: 0,
+    clickEvents: 0,
   });
 
-  const surfaceRows: PurchaseFunnelSurface[] = Array.from(bySurface.entries())
-    .map(([surface, bucket]) => ({
-      surface,
-      shownDevices: bucket.shown,
-      clickedDevices: bucket.clicked,
-      clickRatePct: rate(bucket.clicked, bucket.shown),
-    }))
-    .sort((a, b) => b.shownDevices - a.shownDevices);
+  const byDay = new Map<string, PurchaseFunnelDay>();
+  const dayRow = (dayKey: string): PurchaseFunnelDay => {
+    let row = byDay.get(dayKey);
+    if (!row) {
+      row = {
+        day: dayKey,
+        shownDevices: 0,
+        clickedDevices: 0,
+        newClickedDevices: 0,
+        existingClickedDevices: 0,
+        clickEvents: 0,
+        clickRatePct: null,
+        surfaces: {},
+      };
+      byDay.set(dayKey, row);
+    }
+    return row;
+  };
 
-  const totals = dayRows.reduce(
-    (acc, row) => ({
-      shownDevices: acc.shownDevices + row.shownDevices,
-      clickedDevices: acc.clickedDevices + row.clickedDevices,
-    }),
-    { shownDevices: 0, clickedDevices: 0 }
-  );
+  const bySurface = new Map<string, PurchaseSurfaceCell>();
+  const surfaceCell = (surface: string): PurchaseSurfaceCell => {
+    let cell = bySurface.get(surface);
+    if (!cell) {
+      cell = emptyCell();
+      bySurface.set(surface, cell);
+    }
+    return cell;
+  };
+
+  const period = emptyCell();
+
+  for (const row of rows) {
+    const devices = Number(row.devices || 0);
+    const events = Number(row.events || 0);
+    if (!devices && !events) continue;
+
+    const shown = row.event === "purchase_surface_shown";
+    const surface = row.surface || "unknown";
+
+    if (row.scope === "day" && row.day) {
+      const target = dayRow(row.day);
+      if (shown) target.shownDevices += devices;
+      else {
+        target.clickedDevices += devices;
+        target.clickEvents += events;
+      }
+      continue;
+    }
+
+    if (row.scope === "period") {
+      if (shown) period.shownDevices += devices;
+      else {
+        period.clickedDevices += devices;
+        period.clickEvents += events;
+      }
+      continue;
+    }
+
+    if (row.scope === "surface_day" && row.day) {
+      const cells = dayRow(row.day).surfaces;
+      const cell = cells[surface] || emptyCell();
+      if (shown) cell.shownDevices += devices;
+      else {
+        cell.clickedDevices += devices;
+        cell.clickEvents += events;
+      }
+      cells[surface] = cell;
+      continue;
+    }
+
+    // 只剩 surface：周期内按入口去重。
+    const cell = surfaceCell(surface);
+    if (shown) cell.shownDevices += devices;
+    else {
+      cell.clickedDevices += devices;
+      cell.clickEvents += events;
+    }
+  }
+
+  // 列顺序固定成「曝光多的入口在前」，翻页/换区间时列不会跳来跳去。
+  const surfaces: PurchaseFunnelSurface[] = Array.from(bySurface.entries())
+    .map(([surface, cell]) => ({
+      surface,
+      ...cell,
+      clickRatePct: rate(cell.clickedDevices, cell.shownDevices),
+    }))
+    .sort(
+      (a, b) =>
+        b.shownDevices - a.shownDevices ||
+        b.clickedDevices - a.clickedDevices ||
+        b.clickEvents - a.clickEvents ||
+        a.surface.localeCompare(b.surface)
+    );
+
+  const dayRows: PurchaseFunnelDay[] = Array.from({ length: days }, (_, index) => {
+    const row = dayRow(daysAgo(index));
+    row.newClickedDevices = newByDay.get(row.day) || 0;
+    // 差额归「存量」：查不到首装日的设备也算存量，保证两列严格相加 = 点击设备。
+    row.existingClickedDevices = Math.max(0, row.clickedDevices - row.newClickedDevices);
+    row.clickRatePct = rate(row.clickedDevices, row.shownDevices);
+    return row;
+  });
+
+  // 各入口相加比「合计」多出来的部分：同一台设备看过/点过多个入口时会被各计一次。
+  // 由已有的四个粒度相减即可，不再多扫一遍表。
+  const entrySum = (pick: (cell: PurchaseSurfaceCell) => number) =>
+    surfaces.reduce((total, row) => total + pick(row), 0);
+  const overCount = {
+    shownDevices: Math.max(0, entrySum((row) => row.shownDevices) - period.shownDevices),
+    clickedDevices: Math.max(0, entrySum((row) => row.clickedDevices) - period.clickedDevices),
+  };
+
+  // 一台设备只会在自己的首装日被算一次「新装当天」，所以按天相加就是周期去重后的台数。
+  const newClickedTotal = dayRows.reduce((total, row) => total + row.newClickedDevices, 0);
 
   return {
     filters: { days, productId },
-    totals: { ...totals, clickRatePct: rate(totals.clickedDevices, totals.shownDevices) },
+    totals: {
+      ...period,
+      newClickedDevices: newClickedTotal,
+      existingClickedDevices: Math.max(0, period.clickedDevices - newClickedTotal),
+      clickRatePct: rate(period.clickedDevices, period.shownDevices),
+    },
     days: dayRows,
-    surfaces: surfaceRows,
+    surfaces,
+    /**
+     * 「各入口」列相加比 totals 多出来的台数（不是设备数，是重复计数的差额）。
+     * 页面用它解释"为什么入口列加起来比合计大"，不需要读者自己猜。
+     */
+    overCount,
     // 显式告诉调用方这套口径的边界：老版本客户端（< 0.14.3）只发 purchase_clicked，
-    // 不发 purchase_surface_shown，所以曝光为 0 而点击 > 0 的日子说明的是版本覆盖不足，
+    // 不发 purchase_surface_shown，所以曝光为 0 而点击 > 0 说明的是版本覆盖不足，
     // 不是"点了但没看到"。
     note:
-      "曝光仅统计上报了 purchase_surface_shown 的客户端；点击为 0 且曝光为 0 的日期通常意味着当天没有该版本以上的活跃设备。",
+      "曝光只统计上报 purchase_surface_shown 的客户端（≥0.14.3）；本期曝光为 0 说明线上这些设备没打开过购买入口，或者还没有该版本以上的活跃设备。",
   };
 }
 

@@ -145,7 +145,7 @@ input,select,textarea{border:1px solid #cfd6e1;border-radius:6px;padding:8px 9px
 .inline-form{display:flex;gap:7px;align-items:center}.inline-form input{min-width:150px}
 .funnel{display:grid;gap:10px}.funnel-stage{display:grid;grid-template-columns:minmax(120px,1fr) minmax(180px,3fr) 90px 90px;gap:10px;align-items:center}
 .funnel-bar{height:28px;background:#edf1f6;border-radius:5px;overflow:hidden}.funnel-fill{height:100%;min-width:2px;background:#1e66d0}.funnel-value{font-weight:700}.decision{border-left:4px solid #1e66d0;padding:10px 12px;background:#f3f7fd;margin:8px 0}.decision.warn{border-left-color:#d58a00;background:#fff8e8;color:#6f4b00}.decision.bad{border-left-color:#d64848;background:#fff0f0;color:#8e2929}
-.report-shell{display:grid;gap:18px}.report-tabs{display:flex;align-items:center;gap:4px;border-bottom:1px solid #dfe4eb;overflow-x:auto}.report-tabs a{padding:10px 13px;color:#657184;text-decoration:none;font-size:13px;white-space:nowrap;border-bottom:2px solid transparent}.report-tabs a.active{color:#1768b0;border-bottom-color:#1768b0;font-weight:650}.report-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}.report-head h2{margin:0 0 5px;font-size:21px}.report-head p{margin:0}.range-switch{display:flex;padding:3px;background:#e9edf2;border-radius:7px}.range-switch a{min-width:48px;padding:6px 10px;text-align:center;text-decoration:none;color:#596577;font-size:13px;border-radius:5px}.range-switch a.active{background:#fff;color:#172033;box-shadow:0 1px 3px rgba(20,30,48,.12);font-weight:650}.metric-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));border:1px solid #e1e6ec;background:#fff;border-radius:8px}.metric{padding:16px 18px;border-right:1px solid #edf0f4}.metric:last-child{border-right:0}.metric-label{color:#687386;font-size:12px}.metric-value{font-size:25px;font-weight:720;margin-top:4px}.report-section{background:#fff;border:1px solid #e1e6ec;border-radius:8px;overflow:auto}.section-head{padding:15px 17px;border-bottom:1px solid #e7ebf0;display:flex;align-items:center;justify-content:space-between;gap:10px}.section-head h3{margin:0;font-size:15px}.section-head span{font-size:12px;color:#768195}.report-section table{border:0;border-radius:0;min-width:620px}.click-row{cursor:pointer}.click-row:hover td{background:#f5f8fb}.day-link{color:#1768b0;text-decoration:none;font-weight:650}.number-cell{font-variant-numeric:tabular-nums;font-weight:650}.pagination{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-top:1px solid #e7ebf0}.pagination-links{display:flex;gap:6px}.pagination .disabled{opacity:.45;pointer-events:none}.chips{white-space:nowrap}.fs{display:inline-block;min-width:24px;padding:1px 5px;margin-right:3px;border:1px solid #e5e9f0;border-radius:4px;font-size:11px;text-align:center;color:#c3cbd8;background:#fbfcfe}.fs.on{background:#e8f0fe;border-color:#a9c4f5;color:#1d4ed8;font-weight:600}.duration{font-variant-numeric:tabular-nums}.retention-wrap{overflow:auto}.retention-table{min-width:720px}.retention-cell{font-variant-numeric:tabular-nums}.retention-cell b{display:block}.heat-0{background:#fafbfc}.heat-1{background:#eaf5ef}.heat-2{background:#cfe9da}.heat-3{background:#9fd0b3}.heat-4{background:#55a978;color:#fff}.empty-cell{color:#aab1bc;background:#fafbfc}.identity{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+.report-shell{display:grid;gap:18px}.report-tabs{display:flex;align-items:center;gap:4px;border-bottom:1px solid #dfe4eb;overflow-x:auto}.report-tabs a{padding:10px 13px;color:#657184;text-decoration:none;font-size:13px;white-space:nowrap;border-bottom:2px solid transparent}.report-tabs a.active{color:#1768b0;border-bottom-color:#1768b0;font-weight:650}.report-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}.report-head h2{margin:0 0 5px;font-size:21px}.report-head p{margin:0}.range-switch{display:flex;padding:3px;background:#e9edf2;border-radius:7px}.range-switch a{min-width:48px;padding:6px 10px;text-align:center;text-decoration:none;color:#596577;font-size:13px;border-radius:5px}.range-switch a.active{background:#fff;color:#172033;box-shadow:0 1px 3px rgba(20,30,48,.12);font-weight:650}.metric-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));border:1px solid #e1e6ec;background:#fff;border-radius:8px}.metric{padding:16px 18px;border-right:1px solid #edf0f4}.metric:last-child{border-right:0}.metric-label{color:#687386;font-size:12px}.metric-value{font-size:25px;font-weight:720;margin-top:4px}.report-section{background:#fff;border:1px solid #e1e6ec;border-radius:8px;overflow:auto}.section-head{padding:15px 17px;border-bottom:1px solid #e7ebf0;display:flex;align-items:center;justify-content:space-between;gap:10px}.section-head h3{margin:0;font-size:15px}.section-head span{font-size:12px;color:#768195}.report-section table{border:0;border-radius:0;min-width:620px}.purchase-table th,.purchase-table td{white-space:nowrap}.purchase-table th.grp{text-align:center;background:#eef1f6;border-left:1px solid #e3e8ef}.purchase-table td.grp{border-left:1px solid #e3e8ef}.purchase-table tbody td:first-child{font-weight:650}.purchase-table tfoot td{background:#f7f9fb;font-weight:650;border-top:2px solid #e3e8ef}.purchase-table tfoot td:first-child{color:#5f6b7a}.metric-strip.purchase-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}.purchase-metrics .metric:nth-child(4n){border-right:0}.purchase-metrics .metric:nth-child(n+5){border-top:1px solid #edf0f4}.click-row{cursor:pointer}.click-row:hover td{background:#f5f8fb}.day-link{color:#1768b0;text-decoration:none;font-weight:650}.number-cell{font-variant-numeric:tabular-nums;font-weight:650}.pagination{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-top:1px solid #e7ebf0}.pagination-links{display:flex;gap:6px}.pagination .disabled{opacity:.45;pointer-events:none}.chips{white-space:nowrap}.fs{display:inline-block;min-width:24px;padding:1px 5px;margin-right:3px;border:1px solid #e5e9f0;border-radius:4px;font-size:11px;text-align:center;color:#c3cbd8;background:#fbfcfe}.fs.on{background:#e8f0fe;border-color:#a9c4f5;color:#1d4ed8;font-weight:600}.duration{font-variant-numeric:tabular-nums}.retention-wrap{overflow:auto}.retention-table{min-width:720px}.retention-cell{font-variant-numeric:tabular-nums}.retention-cell b{display:block}.heat-0{background:#fafbfc}.heat-1{background:#eaf5ef}.heat-2{background:#cfe9da}.heat-3{background:#9fd0b3}.heat-4{background:#55a978;color:#fff}.empty-cell{color:#aab1bc;background:#fafbfc}.identity{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
 @media(max-width:800px){.app{grid-template-columns:1fr}.side{position:static;height:auto}.logout{position:static}.head{padding:0 16px}.wrap{padding:16px}}
 .switch{position:relative;display:inline-block;width:44px;height:24px;vertical-align:middle}.switch input{opacity:0;width:0;height:0}.slider{position:absolute;cursor:pointer;inset:0;background:#c6ccd6;border-radius:24px;transition:.2s}.slider:before{content:"";position:absolute;width:18px;height:18px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s;box-shadow:0 1px 3px rgba(0,0,0,.25)}.switch input:checked+.slider{background:#2e9e5b}.switch input:checked+.slider:before{transform:translateX(20px)}.switch input:focus-visible+.slider{outline:2px solid #1768b0;outline-offset:2px}</style></head><body><div class="app"><aside class="side"><div class="brand">授权平台</div>${nav}<a class="logout" href="/admin/logout">退出</a></aside><section class="main"><header class="head"><h1>${e(title)}</h1><span class="muted">Admin</span></header><main class="wrap">${content}</main></section></div></body></html>`;
 }
@@ -962,11 +962,66 @@ export function createAdminUiRouter(db: Database, config: AppConfig): Hono {
     const days = Number(c.req.query("days") || 14);
     const productId = c.req.query("product_id") || "animate";
     const report = await getPurchaseFunnelDays(db, { days, productId });
-    const today = report.days[0] || { shownDevices: 0, clickedDevices: 0, clickRatePct: null };
-    const pct = (value: number | null) => (value === null ? `<span class="muted">—</span>` : `${value}%`);
-    const rows = report.days.map((row) => `<tr><td><span class="day-link">${e(row.day)}</span></td><td class="number-cell">${row.shownDevices}</td><td class="number-cell">${row.clickedDevices}</td><td class="number-cell">${pct(row.clickRatePct)}</td></tr>`).join("");
-    const surfaceRows = report.surfaces.map((row) => `<tr><td>${e(row.surface)}</td><td class="number-cell">${row.shownDevices}</td><td class="number-cell">${row.clickedDevices}</td><td class="number-cell">${pct(row.clickRatePct)}</td></tr>`).join("");
-    const content = `${reportTabs("/admin/telemetry/purchase")}<div class="report-head"><div><h2>购买入口转化</h2><p class="muted">分母是当天看到购买入口的设备（不限新装），分子是当天点了「去购买」的设备；均按安装设备 ID 去重</p></div>${rangeSwitch("/admin/telemetry/purchase", report.filters.days, productId)}</div><div class="metric-strip"><div class="metric"><div class="metric-label">今日曝光设备</div><div class="metric-value">${today.shownDevices.toLocaleString()}</div></div><div class="metric"><div class="metric-label">今日点击设备</div><div class="metric-value">${today.clickedDevices.toLocaleString()}</div></div><div class="metric"><div class="metric-label">今日点击率</div><div class="metric-value">${pct(today.clickRatePct)}</div></div><div class="metric"><div class="metric-label">周期点击率</div><div class="metric-value">${pct(report.totals.clickRatePct)}</div></div></div><section class="report-section"><div class="section-head"><h3>按日曝光 / 点击</h3><span>曝光为 0 而点击为 0：当天没有上报该事件的客户端</span></div><table><thead><tr><th>日期</th><th>曝光设备</th><th>点击设备</th><th>点击率</th></tr></thead><tbody>${rows}</tbody></table></section><section class="report-section"><div class="section-head"><h3>按入口拆分</h3><span>周期内累计</span></div><table><thead><tr><th>入口</th><th>曝光设备</th><th>点击设备</th><th>点击率</th></tr></thead><tbody>${surfaceRows || `<tr><td colspan="4" class="muted">所选周期内没有曝光数据</td></tr>`}</tbody></table></section><p class="muted" style="font-size:12px">${e(report.note)}</p>`;
+    const today = report.days[0] || {
+      shownDevices: 0,
+      clickedDevices: 0,
+      newClickedDevices: 0,
+      existingClickedDevices: 0,
+      clickEvents: 0,
+      clickRatePct: null,
+      surfaces: {},
+    };
+    const pct = (value: number | null) =>
+      value === null || value === undefined ? `<span class="muted">—</span>` : `${value}%`;
+    const columns = report.surfaces.map((row) => row.surface);
+    type Cell = { shownDevices: number; clickedDevices: number; clickEvents: number };
+    const cellsOf = (cells: Record<string, Cell>, list: string[]) =>
+      list
+        .map((surface) => {
+          const cell = cells[surface] || { shownDevices: 0, clickedDevices: 0, clickEvents: 0 };
+          return `<td class="number-cell grp">${cell.shownDevices}</td><td class="number-cell">${cell.clickedDevices}</td><td class="number-cell">${cell.clickEvents}</td>`;
+        })
+        .join("");
+
+    // 一个入口三列：曝光设备 / 点击设备 / 点击次数。「设备」都是按入口去重的台数，
+    // 「次数」才是事件条数 —— 两者并排显示，避免再把点击次数当成点击人数。
+    // 新装当天 / 存量 是「点击设备」按首装日拆开的两列，相加恒等于点击设备。
+    const head = `<thead><tr><th rowspan="2">日期（UTC）</th><th colspan="6" class="grp">合计（跨入口去重）</th>${columns
+      .map((surface) => `<th colspan="3" class="grp">${e(surface)}</th>`)
+      .join("")}</tr><tr><th>曝光设备</th><th>点击设备</th><th>新装当天</th><th>存量</th><th>点击次数</th><th>点击率</th>${columns
+      .map(() => "<th>曝光设备</th><th>点击设备</th><th>次数</th>")
+      .join("")}</tr></thead>`;
+
+    const rows = report.days
+      .map(
+        (row) =>
+          `<tr><td>${e(row.day)}</td><td class="number-cell">${row.shownDevices}</td><td class="number-cell">${row.clickedDevices}</td><td class="number-cell">${row.newClickedDevices}</td><td class="number-cell">${row.existingClickedDevices}</td><td class="number-cell">${row.clickEvents}</td><td class="number-cell">${pct(row.clickRatePct)}</td>${cellsOf(row.surfaces, columns)}</tr>`
+      )
+      .join("");
+
+    const periodCells = Object.fromEntries(
+      report.surfaces.map((row) => [
+        row.surface,
+        { shownDevices: row.shownDevices, clickedDevices: row.clickedDevices, clickEvents: row.clickEvents },
+      ])
+    );
+    const footer = `<tfoot><tr><td>周期合计</td><td class="number-cell">${report.totals.shownDevices}</td><td class="number-cell">${report.totals.clickedDevices}</td><td class="number-cell">${report.totals.newClickedDevices}</td><td class="number-cell">${report.totals.existingClickedDevices}</td><td class="number-cell">${report.totals.clickEvents}</td><td class="number-cell">${pct(report.totals.clickRatePct)}</td>${cellsOf(periodCells, columns)}</tr></tfoot>`;
+
+    // 两张表对不上是旧实现的口径问题：各入口的设备数相加 ≠ 跨入口去重后的设备数。
+    // 这里把差值直接写出来，看到 161 vs 152 时不需要再猜。
+    const overlapNote = report.overCount.clickedDevices
+      ? `各入口的「点击设备」相加比「合计」多 ${report.overCount.clickedDevices}：同一台设备同期点过多个入口时，每个入口各计一次（合计按设备跨入口去重）。日表各行也不能直接相加当周期数（那是设备·日），「新装当天 / 存量」同理。`
+      : report.overCount.shownDevices
+        ? `各入口的「曝光设备」相加比「合计」多 ${report.overCount.shownDevices}：同一台设备同期看过多个入口时，每个入口各计一次（合计按设备跨入口去重）。日表各行也不能直接相加当周期数（那是设备·日），「新装当天 / 存量」同理。`
+        : "各入口的「设备」按入口各自去重，合计按设备跨入口去重；设备只碰一个入口时两者相等。日表各行也不能直接相加当周期数（那是设备·日），「新装当天 / 存量」同理。";
+
+    const metrics = `<div class="metric-strip purchase-metrics"><div class="metric"><div class="metric-label">今日曝光设备</div><div class="metric-value">${today.shownDevices.toLocaleString()}</div></div><div class="metric"><div class="metric-label">今日点击设备</div><div class="metric-value">${today.clickedDevices.toLocaleString()}</div></div><div class="metric"><div class="metric-label">今日点击次数</div><div class="metric-value">${today.clickEvents.toLocaleString()}</div></div><div class="metric"><div class="metric-label">今日点击率</div><div class="metric-value">${pct(today.clickRatePct)}</div></div><div class="metric"><div class="metric-label">周期曝光设备</div><div class="metric-value">${report.totals.shownDevices.toLocaleString()}</div></div><div class="metric"><div class="metric-label">周期点击设备</div><div class="metric-value">${report.totals.clickedDevices.toLocaleString()}</div></div><div class="metric"><div class="metric-label">周期点击次数</div><div class="metric-value">${report.totals.clickEvents.toLocaleString()}</div></div><div class="metric"><div class="metric-label">周期点击率</div><div class="metric-value">${pct(report.totals.clickRatePct)}</div></div></div>`;
+
+    // 这一句是给读者对账用的：「新增安装」页的「去购买」只算当天首装的用户，
+    // 两个页面对同一天给出的数字天生不同 —— 不是谁算错，是分母不同。
+    const scopeNote = "统计对象是当天所有安装设备（含存量用户），不按首装日期筛选；「新增安装」页的「去购买」只算当天首装的用户，两页数字不一样是口径不同。";
+
+    const content = `${reportTabs("/admin/telemetry/purchase")}<div class="report-head"><div><h2>购买入口转化</h2><p class="muted">分母是当期看到购买入口的设备（不限新装），分子是当期点了「去购买」的设备；均按安装设备 ID 去重</p></div>${rangeSwitch("/admin/telemetry/purchase", report.filters.days, productId)}</div>${metrics}<p class="muted" style="font-size:12px;margin:-6px 0 0">${e(scopeNote)}</p><section class="report-section"><div class="section-head"><h3>按日曝光 / 点击</h3><span>日期按 UTC 切分（北京时间 08:00 换日）；新装当天 / 存量 = 点击设备按首装日拆开（相加恒等于点击设备），每个入口三列：曝光设备 / 点击设备 / 点击次数</span></div><table class="purchase-table">${head}<tbody>${rows}</tbody>${columns.length ? footer : ""}</table></section><p class="muted" style="font-size:12px">${e(report.note)}</p><p class="muted" style="font-size:12px">${e(overlapNote)}</p>`;
     return c.html(shell("购买入口转化", "/admin/telemetry/purchase", `<div class="report-shell">${content}</div>`));
   });
 
